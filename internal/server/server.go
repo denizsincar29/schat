@@ -203,13 +203,14 @@ func handleRegistration(channel ssh.Channel, username string) {
 	var password, sshKey string
 
 	if choice == "1" {
-		fmt.Fprintf(channel, "Enter password: ")
-		passwordBytes := make([]byte, 128)
-		n, err := channel.Read(passwordBytes)
+		// Note: SSH protocol doesn't support terminal echo disabling during registration
+		// Users should change their password after registration if security is a concern
+		fmt.Fprintf(channel, "Enter password (warning: visible input): ")
+		line, err := reader.ReadString('\n')
 		if err != nil {
 			return
 		}
-		password = strings.TrimSpace(string(passwordBytes[:n]))
+		password = strings.TrimSpace(line)
 	} else if choice == "2" {
 		fmt.Fprintf(channel, "Paste your SSH public key (end with a line containing only 'END'):\n")
 		var keyLines []string

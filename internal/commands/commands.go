@@ -10,6 +10,11 @@ import (
 	"github.com/denizsincar29/schat/internal/models"
 )
 
+const (
+	minDuration = 2 * time.Minute
+	maxDuration = 24 * time.Hour
+)
+
 type Command struct {
 	Name        string
 	Aliases     []string
@@ -559,12 +564,12 @@ func handleEmote(user *models.User, args []string) (string, error) {
 func parseDuration(s string) (time.Duration, error) {
 	// Try standard Go duration format first
 	if d, err := time.ParseDuration(s); err == nil {
-		// Validate duration is between 2 minutes and 24 hours
-		if d < 2*time.Minute {
-			return 0, fmt.Errorf("duration must be at least 2 minutes")
+		// Validate duration is between minDuration and maxDuration
+		if d < minDuration {
+			return 0, fmt.Errorf("duration must be at least %v", minDuration)
 		}
-		if d > 24*time.Hour {
-			return 0, fmt.Errorf("duration must be at most 24 hours")
+		if d > maxDuration {
+			return 0, fmt.Errorf("duration must be at most %v", maxDuration)
 		}
 		return d, nil
 	}
@@ -608,11 +613,11 @@ func parseDuration(s string) (time.Duration, error) {
 			time.Duration(minutes)*time.Minute +
 			time.Duration(seconds)*time.Second
 
-		if duration < 2*time.Minute {
-			return 0, fmt.Errorf("duration must be at least 2 minutes")
+		if duration < minDuration {
+			return 0, fmt.Errorf("duration must be at least %v", minDuration)
 		}
-		if duration > 24*time.Hour {
-			return 0, fmt.Errorf("duration must be at most 24 hours")
+		if duration > maxDuration {
+			return 0, fmt.Errorf("duration must be at most %v", maxDuration)
 		}
 
 		return duration, nil
