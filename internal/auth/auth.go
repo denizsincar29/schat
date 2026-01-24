@@ -15,11 +15,11 @@ import (
 )
 
 const (
-	saltSize   = 16
-	keySize    = 32
-	timeCost   = 1
-	memory     = 64 * 1024
-	threads    = 4
+	saltSize = 16
+	keySize  = 32
+	timeCost = 1
+	memory   = 64 * 1024
+	threads  = 4
 )
 
 // HashPassword creates a secure hash of the password
@@ -30,10 +30,10 @@ func HashPassword(password string) (string, error) {
 	}
 
 	hash := argon2.IDKey([]byte(password), salt, timeCost, memory, threads, keySize)
-	
+
 	b64Salt := base64.RawStdEncoding.EncodeToString(salt)
 	b64Hash := base64.RawStdEncoding.EncodeToString(hash)
-	
+
 	return fmt.Sprintf("%s$%s", b64Salt, b64Hash), nil
 }
 
@@ -55,14 +55,14 @@ func VerifyPassword(password, hashedPassword string) bool {
 	}
 
 	computedHash := argon2.IDKey([]byte(password), salt, timeCost, memory, threads, keySize)
-	
+
 	return subtle.ConstantTimeCompare(hash, computedHash) == 1
 }
 
 // AuthenticateUser authenticates a user with username and password or SSH key
 func AuthenticateUser(username string, password string, publicKey ssh.PublicKey) (*models.User, error) {
 	var user models.User
-	
+
 	if err := database.DB.Where("username = ?", username).First(&user).Error; err != nil {
 		return nil, fmt.Errorf("user not found")
 	}

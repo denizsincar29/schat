@@ -176,7 +176,7 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *s
 
 func handleRegistration(channel ssh.Channel, username string) {
 	fmt.Fprintf(channel, "Welcome to schat!\n\n")
-	
+
 	if username == "" {
 		fmt.Fprintf(channel, "Please enter your desired username: ")
 		reader := bufio.NewReader(channel)
@@ -201,7 +201,7 @@ func handleRegistration(channel ssh.Channel, username string) {
 	choice = strings.TrimSpace(choice)
 
 	var password, sshKey string
-	
+
 	if choice == "1" {
 		fmt.Fprintf(channel, "Enter password: ")
 		passwordBytes := make([]byte, 128)
@@ -238,7 +238,7 @@ func handleRegistration(channel ssh.Channel, username string) {
 	}
 
 	fmt.Fprintf(channel, "\nRegistration successful! Please reconnect to login.\n")
-	
+
 	logAction(newUser, "register", "User registered")
 }
 
@@ -261,11 +261,11 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 		server.mutex.Lock()
 		delete(server.clients, user.ID)
 		server.mutex.Unlock()
-		
+
 		// Clear current room
 		user.CurrentRoomID = nil
 		database.DB.Save(user)
-		
+
 		logAction(user, "disconnect", "User disconnected")
 	}()
 
@@ -281,7 +281,7 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 	if user.Nickname != "" {
 		displayName = user.Nickname
 	}
-	
+
 	fmt.Fprintf(channel, "\n")
 	fmt.Fprintf(channel, "Welcome to schat, %s!\n", displayName)
 	if user.IsAdmin {
@@ -390,7 +390,7 @@ func handleMessage(client *Client, message string) {
 	if client.User.Nickname != "" {
 		displayName = client.User.Nickname
 	}
-	
+
 	formattedMsg := message
 	if strings.HasPrefix(message, "@me ") {
 		// /me style emote
@@ -483,7 +483,7 @@ func cleanupExpiredBansAndMutes() {
 		database.DB.Model(&models.User{}).
 			Where("is_muted = ? AND mute_expires_at < ?", true, now).
 			Updates(map[string]interface{}{
-				"is_muted":       false,
+				"is_muted":        false,
 				"mute_expires_at": gorm.Expr("NULL"),
 			})
 
@@ -495,7 +495,7 @@ func cleanupExpiredBansAndMutes() {
 
 func loadOrGenerateHostKey() (ssh.Signer, error) {
 	keyPath := getEnv("SSH_HOST_KEY", "./ssh_host_key")
-	
+
 	// Try to load existing key
 	if keyData, err := os.ReadFile(keyPath); err == nil {
 		return ssh.ParsePrivateKey(keyData)

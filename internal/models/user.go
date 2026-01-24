@@ -8,20 +8,20 @@ import (
 
 type User struct {
 	gorm.Model
-	Username       string `gorm:"unique;not null"`
-	PasswordHash   string
-	SSHKey         string `gorm:"type:text"`
-	IsAdmin        bool   `gorm:"default:false"`
-	Nickname       string
-	Status         string
-	BellEnabled    bool   `gorm:"default:true"`
-	CurrentRoomID  *uint
-	CurrentRoom    *Room `gorm:"foreignKey:CurrentRoomID"`
-	IsBanned       bool  `gorm:"default:false"`
-	BanExpiresAt   *time.Time
-	IsMuted        bool `gorm:"default:false"`
-	MuteExpiresAt  *time.Time
-	LastSeenAt     time.Time
+	Username      string `gorm:"unique;not null"`
+	PasswordHash  string
+	SSHKey        string `gorm:"type:text"`
+	IsAdmin       bool   `gorm:"default:false"`
+	Nickname      string
+	Status        string
+	BellEnabled   bool `gorm:"default:true"`
+	CurrentRoomID *uint
+	CurrentRoom   *Room `gorm:"foreignKey:CurrentRoomID"`
+	IsBanned      bool  `gorm:"default:false"`
+	BanExpiresAt  *time.Time
+	IsMuted       bool `gorm:"default:false"`
+	MuteExpiresAt *time.Time
+	LastSeenAt    time.Time
 }
 
 type Room struct {
@@ -35,36 +35,36 @@ type Room struct {
 
 type ChatMessage struct {
 	gorm.Model
-	UserID    uint
-	User      User   `gorm:"foreignKey:UserID"`
-	RoomID    *uint
-	Room      *Room  `gorm:"foreignKey:RoomID"`
-	Content   string `gorm:"not null"`
-	IsPrivate bool   `gorm:"default:false"`
+	UserID      uint
+	User        User `gorm:"foreignKey:UserID"`
+	RoomID      *uint
+	Room        *Room  `gorm:"foreignKey:RoomID"`
+	Content     string `gorm:"not null"`
+	IsPrivate   bool   `gorm:"default:false"`
 	RecipientID *uint
 	Recipient   *User `gorm:"foreignKey:RecipientID"`
 }
 
 type Ban struct {
 	gorm.Model
-	UserID       uint
-	User         User `gorm:"foreignKey:UserID"`
-	BannedByID   uint
-	BannedBy     User      `gorm:"foreignKey:BannedByID"`
-	Reason       string
-	ExpiresAt    time.Time
-	IsActive     bool `gorm:"default:true"`
+	UserID     uint
+	User       User `gorm:"foreignKey:UserID"`
+	BannedByID uint
+	BannedBy   User `gorm:"foreignKey:BannedByID"`
+	Reason     string
+	ExpiresAt  time.Time
+	IsActive   bool `gorm:"default:true"`
 }
 
 type Mute struct {
 	gorm.Model
-	UserID     uint
-	User       User `gorm:"foreignKey:UserID"`
-	MutedByID  uint
-	MutedBy    User      `gorm:"foreignKey:MutedByID"`
-	Reason     string
-	ExpiresAt  time.Time
-	IsActive   bool `gorm:"default:true"`
+	UserID    uint
+	User      User `gorm:"foreignKey:UserID"`
+	MutedByID uint
+	MutedBy   User `gorm:"foreignKey:MutedByID"`
+	Reason    string
+	ExpiresAt time.Time
+	IsActive  bool `gorm:"default:true"`
 }
 
 type Mention struct {

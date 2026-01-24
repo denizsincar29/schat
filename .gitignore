@@ -1,3 +1,5 @@
 ssh_host_key
 .env
 *.log
+schat
+/schat

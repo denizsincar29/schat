@@ -320,7 +320,7 @@ func handleStatus(user *models.User, args []string) (string, error) {
 	} else {
 		user.Status = strings.Join(args, " ")
 	}
-	
+
 	if err := database.DB.Save(user).Error; err != nil {
 		return "", fmt.Errorf("failed to set status: %w", err)
 	}
@@ -374,7 +374,7 @@ func handleMentions(user *models.User, args []string) (string, error) {
 	var result strings.Builder
 	result.WriteString("Unread mentions:\n")
 	for _, mention := range mentions {
-		result.WriteString(fmt.Sprintf("  From %s: %s\n", 
+		result.WriteString(fmt.Sprintf("  From %s: %s\n",
 			mention.Message.User.Username, mention.Message.Content))
 	}
 
@@ -483,11 +483,11 @@ func handleMute(user *models.User, args []string) (string, error) {
 	}
 
 	mute := models.Mute{
-		UserID:     targetUser.ID,
-		MutedByID:  user.ID,
-		Reason:     reason,
-		ExpiresAt:  expiresAt,
-		IsActive:   true,
+		UserID:    targetUser.ID,
+		MutedByID: user.ID,
+		Reason:    reason,
+		ExpiresAt: expiresAt,
+		IsActive:  true,
 	}
 	database.DB.Create(&mute)
 
@@ -604,8 +604,8 @@ func parseDuration(s string) (time.Duration, error) {
 			}
 		}
 
-		duration := time.Duration(hours)*time.Hour + 
-			time.Duration(minutes)*time.Minute + 
+		duration := time.Duration(hours)*time.Hour +
+			time.Duration(minutes)*time.Minute +
 			time.Duration(seconds)*time.Second
 
 		if duration < 2*time.Minute {
