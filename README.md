@@ -64,12 +64,37 @@ cd schat
 
 3. Start the application:
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
 4. View logs:
 ```bash
-docker-compose logs -f
+docker compose logs -f
+```
+
+### Updating After Git Pull
+
+If you pull new changes from the repository, you need to rebuild the Docker containers:
+
+```bash
+# Stop the current containers
+docker compose down
+
+# Rebuild the images with new code
+docker compose build
+
+# Start the containers again
+docker compose up -d
+```
+
+**Note:** If you encounter database migration errors, you may need to reset the database:
+
+```bash
+# Stop and remove containers and volumes (WARNING: This deletes all data!)
+docker compose down -v
+
+# Start fresh
+docker compose up -d
 ```
 
 ### Connecting

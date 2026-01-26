@@ -41,18 +41,34 @@ func Init() error {
 func Migrate() error {
 	log.Println("Running database migrations...")
 
+	// Migrate models in dependency order
+	// First, create tables without foreign key relationships
 	err := DB.AutoMigrate(
+		&models.Settings{},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to run migrations for settings: %w", err)
+	}
+
+	// Create User and Room tables (they have circular FK, but GORM handles this with constraints)
+	err = DB.AutoMigrate(
 		&models.User{},
 		&models.Room{},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to run migrations for users and rooms: %w", err)
+	}
+
+	// Then create tables that depend on User and Room
+	err = DB.AutoMigrate(
 		&models.ChatMessage{},
 		&models.Ban{},
 		&models.Mute{},
 		&models.Mention{},
 		&models.AuditLog{},
-		&models.Settings{},
 	)
 	if err != nil {
-		return fmt.Errorf("failed to run migrations: %w", err)
+		return fmt.Errorf("failed to run migrations for dependent tables: %w", err)
 	}
 
 	// Create default room

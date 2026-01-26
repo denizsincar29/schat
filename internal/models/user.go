@@ -14,8 +14,8 @@ type User struct {
 	IsAdmin       bool   `gorm:"default:false"`
 	Nickname      string
 	Status        string
-	BellEnabled   bool `gorm:"default:true"`
-	CurrentRoomID *uint
+	BellEnabled   bool  `gorm:"default:true"`
+	CurrentRoomID *uint `gorm:"constraint:OnDelete:SET NULL;"`
 	CurrentRoom   *Room `gorm:"foreignKey:CurrentRoomID"`
 	IsBanned      bool  `gorm:"default:false"`
 	BanExpiresAt  *time.Time
@@ -29,8 +29,8 @@ type Room struct {
 	Name        string `gorm:"unique;not null"`
 	Description string
 	IsPrivate   bool `gorm:"default:false"`
-	CreatorID   uint
-	Creator     User `gorm:"foreignKey:CreatorID"`
+	CreatorID   uint `gorm:"default:0"`
+	Creator     User `gorm:"foreignKey:CreatorID;constraint:OnDelete:SET NULL;"`
 }
 
 type ChatMessage struct {
