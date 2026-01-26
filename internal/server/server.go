@@ -565,7 +565,7 @@ func handleCommand(client *Client, line string) {
 	// This bypasses the standard command system because the Command handler
 	// signature doesn't support interactive multiline input from the terminal
 	if cmdName == "addkey" {
-		handleAddKey(client)
+		handleAddKey(client, args)
 		return
 	}
 
@@ -596,7 +596,7 @@ func handleCommand(client *Client, line string) {
 	}
 }
 
-func handleAddKey(client *Client) {
+func handleAddKey(client *Client, args []string) {
 	// Check if user already has an SSH key
 	if client.User.SSHKey != "" {
 		fmt.Fprintf(client.Conn, "You already have an SSH key configured. To replace it, contact an admin.\n")
@@ -609,8 +609,23 @@ func handleAddKey(client *Client) {
 		return
 	}
 
+	// Check for preserve-password flag
+	preservePassword := false
+	for _, arg := range args {
+		argLower := strings.ToLower(arg)
+		if argLower == "preserve-password" || argLower == "pp" || argLower == "keep-password" {
+			preservePassword = true
+			break
+		}
+	}
+
 	fmt.Fprintf(client.Conn, "\nPaste your SSH public key below.\n")
-	fmt.Fprintf(client.Conn, "End with a line containing only 'END'\n\n")
+	fmt.Fprintf(client.Conn, "End with a line containing only 'END'\n")
+	if !preservePassword {
+		fmt.Fprintf(client.Conn, "\nNote: Your password will be removed after adding the SSH key.\n")
+		fmt.Fprintf(client.Conn, "Use '/addkey pp' to keep your password.\n")
+	}
+	fmt.Fprintf(client.Conn, "\n")
 
 	// Store original prompt to restore later
 	originalPrompt := "> "
@@ -650,6 +665,12 @@ func handleAddKey(client *Client) {
 
 	// Update user with SSH key
 	client.User.SSHKey = sshKey
+	
+	// Remove password unless preserve flag is set
+	if !preservePassword {
+		client.User.PasswordHash = ""
+	}
+	
 	if err := database.DB.Save(client.User).Error; err != nil {
 		fmt.Fprintf(client.Conn, "Failed to save SSH key: %v\n", err)
 		client.Terminal.SetPrompt(originalPrompt)
@@ -658,7 +679,11 @@ func handleAddKey(client *Client) {
 
 	logAction(client.User, "addkey", "Added SSH key to account")
 	fmt.Fprintf(client.Conn, "\nSSH key added successfully!\n")
-	fmt.Fprintf(client.Conn, "You can now login using either your password or SSH key.\n")
+	if preservePassword {
+		fmt.Fprintf(client.Conn, "You can now login using either your password or SSH key.\n")
+	} else {
+		fmt.Fprintf(client.Conn, "Your password has been removed. You can now only login using your SSH key.\n")
+	}
 	
 	// Restore prompt
 	client.Terminal.SetPrompt(originalPrompt)

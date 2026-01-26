@@ -39,7 +39,7 @@ A feature-rich SSH-based chat application written in Go with support for user re
 - `/news` - View unread mentions and private messages
 - `/bell` - Toggle bell notifications
 - `/me <action>` - Send an emote
-- `/addkey` - Add SSH key to your password-authenticated account
+- `/addkey [pp]` - Add SSH key (replaces password unless `pp` flag is used)
 - `/report @username <reason>` - Report a user to admins
 
 ### Admin Commands
