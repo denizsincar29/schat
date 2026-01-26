@@ -593,7 +593,7 @@ func handleMessage(client *Client, message string) {
 		formattedMsg = strings.ReplaceAll(message, "@me", displayName)
 	} else {
 		// Normal message with username prefix
-		formattedMsg = fmt.Sprintf("<%s> %s", displayName, message)
+		formattedMsg = fmt.Sprintf("%s: %s", displayName, message)
 	}
 
 	// Save message to database
@@ -632,7 +632,7 @@ func handleMessage(client *Client, message string) {
 	}
 
 	// Broadcast message to room
-	broadcastToRoom(*client.User.CurrentRoomID, formattedMsg, 0)
+	broadcastToRoom(*client.User.CurrentRoomID, formattedMsg, client.User.ID)
 
 	logAction(client.User, "message", fmt.Sprintf("Sent message in room %d", *client.User.CurrentRoomID))
 }
@@ -647,7 +647,7 @@ func broadcastToRoom(roomID uint, message string, excludeUserID uint) {
 		}
 		if client.User.CurrentRoomID != nil && *client.User.CurrentRoomID == roomID {
 			client.Mutex.Lock()
-			fmt.Fprintf(client.Conn, "\n%s\n> ", message)
+			fmt.Fprintf(client.Conn, "%s\n", message)
 			client.Mutex.Unlock()
 		}
 	}
