@@ -23,6 +23,18 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	// ASCII control characters
+	asciiBackspace      = 8
+	asciiDelete         = 127
+	asciiCtrlC          = 3
+	asciiCarriageReturn = '\r'
+	asciiNewline        = '\n'
+	// Printable ASCII range (space to ~)
+	asciiPrintableStart = 32
+	asciiPrintableEnd   = 127
+)
+
 type Client struct {
 	User    *models.User
 	Conn    ssh.Channel
@@ -78,7 +90,21 @@ func Run() error {
 				},
 			}, nil
 		},
-		NoClientAuth: true, // Allow anonymous connections for registration
+		// Allow keyboard-interactive for registration prompts
+		KeyboardInteractiveCallback: func(conn ssh.ConnMetadata, client ssh.KeyboardInteractiveChallenge) (*ssh.Permissions, error) {
+			// Check if user exists
+			var user models.User
+			if err := database.DB.Where("username = ?", conn.User()).First(&user).Error; err != nil {
+				// User doesn't exist - allow connection for registration
+				return &ssh.Permissions{
+					Extensions: map[string]string{
+						"registration": "true",
+					},
+				}, nil
+			}
+			// User exists - they should use password or key auth
+			return nil, fmt.Errorf("please use password or SSH key authentication")
+		},
 	}
 
 	// Load or generate host key
@@ -146,56 +172,109 @@ func handleConnection(netConn net.Conn, config *ssh.ServerConfig) {
 func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *ssh.ServerConn) {
 	defer channel.Close()
 
+	// Channel to signal when PTY/shell setup is complete
+	setupDone := make(chan bool, 1)
+
 	// Handle session requests
 	go func() {
+		shellReceived := false
 		for req := range requests {
 			switch req.Type {
-			case "shell", "pty-req":
+			case "pty-req":
+				// Accept PTY request - client will handle terminal modes
+				req.Reply(true, nil)
+			case "shell":
+				shellReceived = true
+				req.Reply(true, nil)
+				// Signal that setup is complete
+				select {
+				case setupDone <- true:
+				default:
+				}
+			case "window-change":
+				// Accept window size changes
 				req.Reply(true, nil)
 			default:
 				req.Reply(false, nil)
 			}
 		}
+		// Ensure we signal even if shell is never received
+		if !shellReceived {
+			select {
+			case setupDone <- true:
+			default:
+			}
+		}
 	}()
+
+	// Wait for setup to complete or timeout
+	select {
+	case <-setupDone:
+		// Setup complete, proceed
+	case <-time.After(200 * time.Millisecond):
+		// Timeout, proceed anyway
+	}
 
 	// Check if user is authenticated
 	var user *models.User
-	if sshConn.Permissions != nil && sshConn.Permissions.Extensions["user_id"] != "" {
-		var userID uint
-		fmt.Sscanf(sshConn.Permissions.Extensions["user_id"], "%d", &userID)
-		if err := database.DB.First(&user, userID).Error; err == nil {
-			// User is authenticated
-			handleAuthenticatedUser(channel, user)
+	if sshConn.Permissions != nil {
+		// Check if this is a registration session
+		if sshConn.Permissions.Extensions["registration"] == "true" {
+			// Anonymous user - handle registration
+			handleRegistration(channel, sshConn.User())
 			return
+		}
+		
+		// Check if user_id is set (authenticated user)
+		if sshConn.Permissions.Extensions["user_id"] != "" {
+			var userID uint
+			n, err := fmt.Sscanf(sshConn.Permissions.Extensions["user_id"], "%d", &userID)
+			if err != nil || n != 1 || userID == 0 {
+				fmt.Fprintf(channel, "Invalid user ID in session. Please try again.\r\n")
+				return
+			}
+			if err := database.DB.First(&user, userID).Error; err == nil {
+				// User is authenticated
+				handleAuthenticatedUser(channel, user)
+				return
+			}
 		}
 	}
 
-	// Anonymous user - handle registration
-	handleRegistration(channel, sshConn.User())
+	// If we get here, something went wrong - close the connection
+	fmt.Fprintf(channel, "Authentication error. Please try again.\r\n")
 }
 
 func handleRegistration(channel ssh.Channel, username string) {
-	fmt.Fprintf(channel, "Welcome to schat!\n\n")
+	fmt.Fprintf(channel, "Welcome to schat!\r\n\r\n")
 
+	reader := bufio.NewReader(channel)
+
+	// Get username if not provided
 	if username == "" {
 		fmt.Fprintf(channel, "Please enter your desired username: ")
-		reader := bufio.NewReader(channel)
-		line, err := reader.ReadString('\n')
+		line, err := readLine(channel, reader)
 		if err != nil {
+			fmt.Fprintf(channel, "\r\nError reading input: %v\r\n", err)
 			return
 		}
 		username = strings.TrimSpace(line)
 	}
 
-	fmt.Fprintf(channel, "Username: %s\n", username)
-	fmt.Fprintf(channel, "\nChoose authentication method:\n")
-	fmt.Fprintf(channel, "1. Password\n")
-	fmt.Fprintf(channel, "2. SSH Key\n")
+	if username == "" {
+		fmt.Fprintf(channel, "Username cannot be empty\r\n")
+		return
+	}
+
+	fmt.Fprintf(channel, "Username: %s\r\n", username)
+	fmt.Fprintf(channel, "\r\nChoose authentication method:\r\n")
+	fmt.Fprintf(channel, "1. Password\r\n")
+	fmt.Fprintf(channel, "2. SSH Key\r\n")
 	fmt.Fprintf(channel, "Enter choice (1 or 2): ")
 
-	reader := bufio.NewReader(channel)
-	choice, err := reader.ReadString('\n')
+	choice, err := readLine(channel, reader)
 	if err != nil {
+		fmt.Fprintf(channel, "\r\nError reading input: %v\r\n", err)
 		return
 	}
 	choice = strings.TrimSpace(choice)
@@ -203,44 +282,108 @@ func handleRegistration(channel ssh.Channel, username string) {
 	var password, sshKey string
 
 	if choice == "1" {
-		// Note: SSH protocol doesn't support terminal echo disabling during registration
-		// Users should change their password after registration if security is a concern
-		fmt.Fprintf(channel, "Enter password (warning: visible input): ")
-		line, err := reader.ReadString('\n')
+		fmt.Fprintf(channel, "\r\nEnter password (visible): ")
+		line, err := readLine(channel, reader)
 		if err != nil {
+			fmt.Fprintf(channel, "\r\nError reading input: %v\r\n", err)
 			return
 		}
 		password = strings.TrimSpace(line)
+
+		if password == "" {
+			fmt.Fprintf(channel, "Password cannot be empty\r\n")
+			return
+		}
 	} else if choice == "2" {
-		fmt.Fprintf(channel, "Paste your SSH public key (end with a line containing only 'END'):\n")
+		fmt.Fprintf(channel, "\r\nPaste your SSH public key (end with a line containing only 'END'):\r\n")
 		var keyLines []string
 		for {
-			line, err := reader.ReadString('\n')
+			line, err := readLine(channel, reader)
 			if err != nil {
+				fmt.Fprintf(channel, "\r\nError reading input: %v\r\n", err)
 				return
 			}
 			line = strings.TrimSpace(line)
 			if line == "END" {
 				break
 			}
-			keyLines = append(keyLines, line)
+			if line != "" {
+				keyLines = append(keyLines, line)
+			}
 		}
 		sshKey = strings.Join(keyLines, "\n")
+
+		if sshKey == "" {
+			fmt.Fprintf(channel, "SSH key cannot be empty\r\n")
+			return
+		}
 	} else {
-		fmt.Fprintf(channel, "Invalid choice\n")
+		fmt.Fprintf(channel, "Invalid choice. Please enter 1 or 2.\r\n")
 		return
 	}
 
 	// Create user
 	newUser, err := auth.CreateUser(username, password, sshKey, false)
 	if err != nil {
-		fmt.Fprintf(channel, "Registration failed: %v\n", err)
+		fmt.Fprintf(channel, "\r\nRegistration failed: %v\r\n", err)
 		return
 	}
 
-	fmt.Fprintf(channel, "\nRegistration successful! Please reconnect to login.\n")
+	fmt.Fprintf(channel, "\r\nRegistration successful! Please reconnect to login.\r\n")
 
 	logAction(newUser, "register", "User registered")
+}
+
+// readLine reads a line from the channel with proper echo support
+func readLine(channel ssh.Channel, reader *bufio.Reader) (string, error) {
+	var line strings.Builder
+	buf := make([]byte, 1)
+	lineStarted := false
+
+	for {
+		n, err := reader.Read(buf)
+		if err != nil {
+			if err == io.EOF && line.Len() > 0 {
+				return line.String(), nil
+			}
+			return "", err
+		}
+
+		if n > 0 {
+			ch := buf[0]
+			
+			// Skip leading line-ending characters from previous input
+			if !lineStarted && (ch == asciiCarriageReturn || ch == asciiNewline) {
+				continue
+			}
+			
+			switch ch {
+			case asciiCarriageReturn, asciiNewline:
+				// Echo newline
+				channel.Write([]byte("\r\n"))
+				// Return immediately - any trailing \n or \r will be skipped on next call
+				return line.String(), nil
+			case asciiDelete, asciiBackspace:
+				if line.Len() > 0 {
+					// Remove last character
+					str := line.String()
+					line.Reset()
+					line.WriteString(str[:len(str)-1])
+					// Echo backspace sequence
+					channel.Write([]byte("\b \b"))
+				}
+			case asciiCtrlC:
+				return "", fmt.Errorf("interrupted")
+			default:
+				// Echo the character back
+				if ch >= asciiPrintableStart && ch < asciiPrintableEnd {
+					lineStarted = true
+					line.WriteByte(ch)
+					channel.Write(buf[:1])
+				}
+			}
+		}
+	}
 }
 
 func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
