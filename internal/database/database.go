@@ -27,7 +27,8 @@ func Init() error {
 
 	var err error
 	DB, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Info),
+		Logger:                                   logger.Default.LogMode(logger.Info),
+		DisableForeignKeyConstraintWhenMigrating: true,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)
@@ -41,37 +42,33 @@ func Init() error {
 func Migrate() error {
 	log.Println("Running database migrations...")
 
-	// Migrate models in dependency order
-	// First, create tables without foreign key relationships
-	err := DB.AutoMigrate(
-		&models.Settings{},
-	)
-	if err != nil {
-		return fmt.Errorf("failed to run migrations for settings: %w", err)
+	// Migrate tables in dependency order
+	// With DisableForeignKeyConstraintWhenMigrating=true, GORM won't create FK constraints,
+	// allowing us to migrate tables with circular dependencies
+
+	// Settings table (no dependencies)
+	if err := DB.AutoMigrate(&models.Settings{}); err != nil {
+		return fmt.Errorf("failed to migrate settings: %w", err)
 	}
 
-	// Create User and Room tables (they have circular FK, but GORM handles this with constraints)
-	err = DB.AutoMigrate(
-		&models.User{},
-		&models.Room{},
-	)
-	if err != nil {
-		return fmt.Errorf("failed to run migrations for users and rooms: %w", err)
+	// User and Room tables have circular dependency (User.CurrentRoom <-> Room.Creator)
+	// Migrate them in sequence - User first, then Room
+	if err := DB.AutoMigrate(&models.User{}, &models.Room{}); err != nil {
+		return fmt.Errorf("failed to migrate users and rooms: %w", err)
 	}
 
-	// Then create tables that depend on User and Room
-	err = DB.AutoMigrate(
+	// Migrate remaining tables that depend on User and/or Room
+	if err := DB.AutoMigrate(
 		&models.ChatMessage{},
 		&models.Ban{},
 		&models.Mute{},
 		&models.Mention{},
 		&models.AuditLog{},
-	)
-	if err != nil {
-		return fmt.Errorf("failed to run migrations for dependent tables: %w", err)
+	); err != nil {
+		return fmt.Errorf("failed to migrate dependent tables: %w", err)
 	}
 
-	// Create default room
+	// Create default room if it doesn't exist
 	var count int64
 	DB.Model(&models.Room{}).Count(&count)
 	if count == 0 {
