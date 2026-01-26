@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -312,14 +313,24 @@ func handleRegistration(channel ssh.Channel, username string) {
 		return
 	}
 
-	// Create user
-	newUser, err := auth.CreateUser(username, password, sshKey, false)
+	// Check if this is the first user
+	var userCount int64
+	database.DB.Model(&models.User{}).Count(&userCount)
+	isFirstUser := userCount == 0
+
+	// Create user - first user is automatically admin
+	newUser, err := auth.CreateUser(username, password, sshKey, isFirstUser)
 	if err != nil {
 		fmt.Fprintf(channel, "\r\nRegistration failed: %v\r\n", err)
 		return
 	}
 
-	fmt.Fprintf(channel, "\r\nRegistration successful! Please reconnect to login.\r\n")
+	if isFirstUser {
+		fmt.Fprintf(channel, "\r\nRegistration successful! You are the first user and have been granted admin privileges.\r\n")
+		fmt.Fprintf(channel, "Please reconnect to login.\r\n")
+	} else {
+		fmt.Fprintf(channel, "\r\nRegistration successful! Please reconnect to login.\r\n")
+	}
 
 	logAction(newUser, "register", "User registered")
 }
@@ -381,6 +392,107 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 
 	// Start reading input using term.Terminal for proper echo handling
 	terminal := term.NewTerminal(channel, "> ")
+	
+	// Setup tab completion
+	terminal.AutoCompleteCallback = func(line string, pos int, key rune) (newLine string, newPos int, ok bool) {
+		// Only handle tab key
+		if key != '\t' {
+			return "", 0, false
+		}
+
+		// Get the part before cursor
+		prefix := line[:pos]
+		suffix := line[pos:]
+		
+		// Find the word we're completing (last word in prefix)
+		words := strings.Fields(prefix)
+		if len(words) == 0 && len(prefix) > 0 && prefix[len(prefix)-1] == ' ' {
+			// Cursor is after a space, nothing to complete
+			return "", 0, false
+		}
+		
+		var wordToComplete string
+		var beforeWord string
+		if len(words) > 0 {
+			wordToComplete = words[len(words)-1]
+			beforeWord = prefix[:len(prefix)-len(wordToComplete)]
+		} else {
+			wordToComplete = prefix
+			beforeWord = ""
+		}
+
+		var completions []string
+
+		// Command completion (starts with /)
+		if strings.HasPrefix(wordToComplete, "/") {
+			cmdPrefix := strings.ToLower(wordToComplete[1:])
+			for cmdName := range commands.Commands {
+				if strings.HasPrefix(cmdName, cmdPrefix) {
+					completions = append(completions, "/"+cmdName)
+				}
+			}
+		} else if strings.HasPrefix(wordToComplete, "@") {
+			// Username completion for mentions (starts with @)
+			userPrefix := wordToComplete[1:]
+			var users []models.User
+			// Use database filtering for efficiency
+			database.DB.Where("username LIKE ?", userPrefix+"%").Limit(10).Find(&users)
+			for _, u := range users {
+				completions = append(completions, "@"+u.Username)
+			}
+		} else if len(words) > 0 && (words[0] == "/join" || words[0] == "/j") && len(words) <= 2 {
+			// Room name completion after /join command
+			roomPrefix := strings.ToLower(wordToComplete)
+			var rooms []models.Room
+			database.DB.Find(&rooms)
+			for _, r := range rooms {
+				if strings.HasPrefix(strings.ToLower(r.Name), roomPrefix) {
+					completions = append(completions, r.Name)
+				}
+			}
+		} else if len(words) > 0 {
+			// Check if command needs username completion
+			cmdName := strings.ToLower(words[0])
+			if strings.HasPrefix(cmdName, "/") {
+				cmdName = cmdName[1:]
+			}
+			cmd := commands.GetCommand(cmdName)
+			if cmd != nil {
+				// Commands that take username as argument
+				usernameCommands := map[string]bool{
+					"msg": true, "pm": true, "whisper": true, "w": true,
+					"ban": true, "b": true, "kick": true, "k": true,
+					"mute": true, "silence": true, "unban": true, "ub": true,
+					"unmute": true, "um": true, "promote": true, "makeadmin": true,
+					"demote": true, "removeadmin": true, "deleteuser": true,
+					"deluser": true, "removeuser": true,
+				}
+				if usernameCommands[cmdName] {
+					userPrefix := wordToComplete
+					var users []models.User
+					// Use database filtering for efficiency
+					database.DB.Where("username LIKE ?", userPrefix+"%").Limit(10).Find(&users)
+					for _, u := range users {
+						completions = append(completions, u.Username)
+					}
+				}
+			}
+		}
+
+		if len(completions) == 0 {
+			return "", 0, false
+		}
+
+		// Sort completions for consistent behavior
+		sort.Strings(completions)
+
+		// Return first match
+		completion := completions[0]
+		newLine = beforeWord + completion + suffix
+		newPos = len(beforeWord + completion)
+		return newLine, newPos, true
+	}
+	
 	for {
 		line, err := terminal.ReadLine()
 		if err != nil {
@@ -481,7 +593,7 @@ func handleMessage(client *Client, message string) {
 		formattedMsg = strings.ReplaceAll(message, "@me", displayName)
 	} else {
 		// Normal message with username prefix
-		formattedMsg = fmt.Sprintf("<%s> %s", displayName, message)
+		formattedMsg = fmt.Sprintf("%s: %s", displayName, message)
 	}
 
 	// Save message to database
@@ -520,7 +632,7 @@ func handleMessage(client *Client, message string) {
 	}
 
 	// Broadcast message to room
-	broadcastToRoom(*client.User.CurrentRoomID, formattedMsg, 0)
+	broadcastToRoom(*client.User.CurrentRoomID, formattedMsg, client.User.ID)
 
 	logAction(client.User, "message", fmt.Sprintf("Sent message in room %d", *client.User.CurrentRoomID))
 }
@@ -535,7 +647,7 @@ func broadcastToRoom(roomID uint, message string, excludeUserID uint) {
 		}
 		if client.User.CurrentRoomID != nil && *client.User.CurrentRoomID == roomID {
 			client.Mutex.Lock()
-			fmt.Fprintf(client.Conn, "\n%s\n> ", message)
+			fmt.Fprintf(client.Conn, "%s\n", message)
 			client.Mutex.Unlock()
 		}
 	}
