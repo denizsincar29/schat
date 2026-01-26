@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -194,6 +195,31 @@ func init() {
 		Usage:       "/me <action> or text @me more text",
 		Handler:     handleEmote,
 	})
+
+	registerCommand(&Command{
+		Name:        "news",
+		Aliases:     []string{"inbox", "notifications"},
+		Description: "View your unread mentions and private messages",
+		Usage:       "/news",
+		Handler:     handleNews,
+	})
+
+	registerCommand(&Command{
+		Name:        "report",
+		Aliases:     []string{"reportuser"},
+		Description: "Report a user to admins",
+		Usage:       "/report @username <reason>",
+		Handler:     handleReport,
+	})
+
+	registerCommand(&Command{
+		Name:        "reports",
+		Aliases:     []string{"viewreports"},
+		Description: "View user reports (admin only)",
+		Usage:       "/reports",
+		Handler:     handleReports,
+		AdminOnly:   true,
+	})
 }
 
 func registerCommand(cmd *Command) {
@@ -305,15 +331,21 @@ func handleCreate(user *models.User, args []string) (string, error) {
 
 func handlePrivateMessage(user *models.User, args []string) (string, error) {
 	if len(args) < 2 {
-		return "", fmt.Errorf("usage: /msg <username> <message>")
+		return "", fmt.Errorf("usage: /msg @username <message>")
 	}
 
-	username := args[0]
+	username := strings.TrimPrefix(args[0], "@")
+	
+	// Handle @admin - send to all admins
+	if username == "admin" {
+		return sendToAllAdmins(user, strings.Join(args[1:], " "))
+	}
+	
 	message := strings.Join(args[1:], " ")
 
 	var recipient models.User
 	if err := database.DB.Where("username = ?", username).First(&recipient).Error; err != nil {
-		return "", fmt.Errorf("user not found: %s", username)
+		return "", fmt.Errorf("user not found: @%s", username)
 	}
 
 	chatMsg := models.ChatMessage{
@@ -338,7 +370,7 @@ func handlePrivateMessage(user *models.User, args []string) (string, error) {
 		logAction(user, "private_message", fmt.Sprintf("Sent PM to %s", username))
 	}
 
-	return fmt.Sprintf("Private message sent to %s", username), nil
+	return fmt.Sprintf("Private message sent to @%s", username), nil
 }
 
 func handleNickname(user *models.User, args []string) (string, error) {
@@ -440,10 +472,10 @@ func handleBell(user *models.User, args []string) (string, error) {
 
 func handleBan(user *models.User, args []string) (string, error) {
 	if len(args) < 2 {
-		return "", fmt.Errorf("usage: /ban <username> <duration> [reason]")
+		return "", fmt.Errorf("usage: /ban @username <duration> [reason]")
 	}
 
-	username := args[0]
+	username := strings.TrimPrefix(args[0], "@")
 	durationStr := args[1]
 	reason := ""
 	if len(args) > 2 {
@@ -457,7 +489,7 @@ func handleBan(user *models.User, args []string) (string, error) {
 
 	var targetUser models.User
 	if err := database.DB.Where("username = ?", username).First(&targetUser).Error; err != nil {
-		return "", fmt.Errorf("user not found: %s", username)
+		return "", fmt.Errorf("user not found: @%s", username)
 	}
 
 	if targetUser.IsAdmin {
@@ -482,7 +514,7 @@ func handleBan(user *models.User, args []string) (string, error) {
 
 	logAction(user, "ban", fmt.Sprintf("Banned %s for %s: %s", username, durationStr, reason))
 
-	return fmt.Sprintf("Banned %s until %s", username, expiresAt.Format("2006-01-02 15:04:05")), nil
+	return fmt.Sprintf("Banned @%s until %s", username, expiresAt.Format("2006-01-02 15:04:05")), nil
 }
 
 func handleKick(user *models.User, args []string) (string, error) {
@@ -492,10 +524,10 @@ func handleKick(user *models.User, args []string) (string, error) {
 
 func handleMute(user *models.User, args []string) (string, error) {
 	if len(args) < 2 {
-		return "", fmt.Errorf("usage: /mute <username> <duration> [reason]")
+		return "", fmt.Errorf("usage: /mute @username <duration> [reason]")
 	}
 
-	username := args[0]
+	username := strings.TrimPrefix(args[0], "@")
 	durationStr := args[1]
 	reason := ""
 	if len(args) > 2 {
@@ -509,7 +541,7 @@ func handleMute(user *models.User, args []string) (string, error) {
 
 	var targetUser models.User
 	if err := database.DB.Where("username = ?", username).First(&targetUser).Error; err != nil {
-		return "", fmt.Errorf("user not found: %s", username)
+		return "", fmt.Errorf("user not found: @%s", username)
 	}
 
 	if targetUser.IsAdmin {
@@ -534,18 +566,18 @@ func handleMute(user *models.User, args []string) (string, error) {
 
 	logAction(user, "mute", fmt.Sprintf("Muted %s for %s: %s", username, durationStr, reason))
 
-	return fmt.Sprintf("Muted %s until %s", username, expiresAt.Format("2006-01-02 15:04:05")), nil
+	return fmt.Sprintf("Muted @%s until %s", username, expiresAt.Format("2006-01-02 15:04:05")), nil
 }
 
 func handleUnban(user *models.User, args []string) (string, error) {
 	if len(args) < 1 {
-		return "", fmt.Errorf("usage: /unban <username>")
+		return "", fmt.Errorf("usage: /unban @username")
 	}
 
-	username := args[0]
+	username := strings.TrimPrefix(args[0], "@")
 	var targetUser models.User
 	if err := database.DB.Where("username = ?", username).First(&targetUser).Error; err != nil {
-		return "", fmt.Errorf("user not found: %s", username)
+		return "", fmt.Errorf("user not found: @%s", username)
 	}
 
 	targetUser.IsBanned = false
@@ -559,18 +591,18 @@ func handleUnban(user *models.User, args []string) (string, error) {
 
 	logAction(user, "unban", fmt.Sprintf("Unbanned %s", username))
 
-	return fmt.Sprintf("Unbanned %s", username), nil
+	return fmt.Sprintf("Unbanned @%s", username), nil
 }
 
 func handleUnmute(user *models.User, args []string) (string, error) {
 	if len(args) < 1 {
-		return "", fmt.Errorf("usage: /unmute <username>")
+		return "", fmt.Errorf("usage: /unmute @username")
 	}
 
-	username := args[0]
+	username := strings.TrimPrefix(args[0], "@")
 	var targetUser models.User
 	if err := database.DB.Where("username = ?", username).First(&targetUser).Error; err != nil {
-		return "", fmt.Errorf("user not found: %s", username)
+		return "", fmt.Errorf("user not found: @%s", username)
 	}
 
 	targetUser.IsMuted = false
@@ -584,7 +616,7 @@ func handleUnmute(user *models.User, args []string) (string, error) {
 
 	logAction(user, "unmute", fmt.Sprintf("Unmuted %s", username))
 
-	return fmt.Sprintf("Unmuted %s", username), nil
+	return fmt.Sprintf("Unmuted @%s", username), nil
 }
 
 func handleEmote(user *models.User, args []string) (string, error) {
@@ -673,17 +705,17 @@ func logAction(user *models.User, action string, details string) {
 
 func handlePromote(user *models.User, args []string) (string, error) {
 	if len(args) < 1 {
-		return "", fmt.Errorf("usage: /promote <username>")
+		return "", fmt.Errorf("usage: /promote @username")
 	}
 
-	username := args[0]
+	username := strings.TrimPrefix(args[0], "@")
 	var targetUser models.User
 	if err := database.DB.Where("username = ?", username).First(&targetUser).Error; err != nil {
-		return "", fmt.Errorf("user not found: %s", username)
+		return "", fmt.Errorf("user not found: @%s", username)
 	}
 
 	if targetUser.IsAdmin {
-		return "", fmt.Errorf("%s is already an admin", username)
+		return "", fmt.Errorf("@%s is already an admin", username)
 	}
 
 	targetUser.IsAdmin = true
@@ -692,22 +724,22 @@ func handlePromote(user *models.User, args []string) (string, error) {
 	}
 
 	logAction(user, "promote", fmt.Sprintf("Promoted %s to admin", username))
-	return fmt.Sprintf("%s has been promoted to admin", username), nil
+	return fmt.Sprintf("@%s has been promoted to admin", username), nil
 }
 
 func handleDemote(user *models.User, args []string) (string, error) {
 	if len(args) < 1 {
-		return "", fmt.Errorf("usage: /demote <username>")
+		return "", fmt.Errorf("usage: /demote @username")
 	}
 
-	username := args[0]
+	username := strings.TrimPrefix(args[0], "@")
 	var targetUser models.User
 	if err := database.DB.Where("username = ?", username).First(&targetUser).Error; err != nil {
-		return "", fmt.Errorf("user not found: %s", username)
+		return "", fmt.Errorf("user not found: @%s", username)
 	}
 
 	if !targetUser.IsAdmin {
-		return "", fmt.Errorf("%s is not an admin", username)
+		return "", fmt.Errorf("@%s is not an admin", username)
 	}
 
 	// Prevent demoting the only admin (whether it's yourself or someone else)
@@ -723,7 +755,7 @@ func handleDemote(user *models.User, args []string) (string, error) {
 	}
 
 	logAction(user, "demote", fmt.Sprintf("Demoted %s from admin", username))
-	return fmt.Sprintf("%s has been demoted from admin", username), nil
+	return fmt.Sprintf("@%s has been demoted from admin", username), nil
 }
 
 func handleListAdmins(user *models.User, args []string) (string, error) {
@@ -754,10 +786,10 @@ func handleListAdmins(user *models.User, args []string) (string, error) {
 
 func handleDeleteUser(user *models.User, args []string) (string, error) {
 	if len(args) < 1 {
-		return "", fmt.Errorf("usage: /deleteuser <username>")
+		return "", fmt.Errorf("usage: /deleteuser @username")
 	}
 
-	username := args[0]
+	username := strings.TrimPrefix(args[0], "@")
 
 	// Prevent deleting yourself
 	if username == user.Username {
@@ -766,7 +798,7 @@ func handleDeleteUser(user *models.User, args []string) (string, error) {
 
 	var targetUser models.User
 	if err := database.DB.Where("username = ?", username).First(&targetUser).Error; err != nil {
-		return "", fmt.Errorf("user not found: %s", username)
+		return "", fmt.Errorf("user not found: @%s", username)
 	}
 
 	// Prevent deleting the only admin
@@ -794,5 +826,176 @@ func handleDeleteUser(user *models.User, args []string) (string, error) {
 	}
 
 	logAction(user, "deleteuser", fmt.Sprintf("Deleted user %s", username))
-	return fmt.Sprintf("User %s has been deleted", username), nil
+	return fmt.Sprintf("User @%s has been deleted", username), nil
+}
+
+func handleNews(user *models.User, args []string) (string, error) {
+	var result strings.Builder
+	hasContent := false
+
+	// Get unread mentions
+	var mentions []models.Mention
+	if err := database.DB.Preload("Message").Preload("Message.User").
+		Where("user_id = ? AND is_read = ?", user.ID, false).
+		Find(&mentions).Error; err == nil && len(mentions) > 0 {
+		hasContent = true
+		result.WriteString("=== Unread Mentions ===\n")
+		for _, mention := range mentions {
+			senderName := mention.Message.User.Username
+			if mention.Message.User.Nickname != "" {
+				senderName = mention.Message.User.Nickname
+			}
+			result.WriteString(fmt.Sprintf("From %s: %s\n", senderName, mention.Message.Content))
+		}
+		result.WriteString("\n")
+		
+		// Mark mentions as read
+		database.DB.Model(&models.Mention{}).Where("user_id = ? AND is_read = ?", user.ID, false).
+			Update("is_read", true)
+	}
+
+	// Get unread private messages
+	var messages []models.ChatMessage
+	if err := database.DB.Preload("User").
+		Where("recipient_id = ? AND is_private = ? AND created_at > ?", user.ID, true, user.LastSeenAt).
+		Order("created_at ASC").
+		Find(&messages).Error; err == nil && len(messages) > 0 {
+		hasContent = true
+		result.WriteString("=== Unread Private Messages ===\n")
+		for _, msg := range messages {
+			senderName := msg.User.Username
+			if msg.User.Nickname != "" {
+				senderName = msg.User.Nickname
+			}
+			result.WriteString(fmt.Sprintf("From %s: %s\n", senderName, msg.Content))
+		}
+		result.WriteString("\n")
+	}
+
+	if !hasContent {
+		return "No unread mentions or private messages", nil
+	}
+
+	return result.String(), nil
+}
+
+func handleReport(user *models.User, args []string) (string, error) {
+	if len(args) < 2 {
+		return "", fmt.Errorf("usage: /report @username <reason>")
+	}
+
+	username := strings.TrimPrefix(args[0], "@")
+	reason := strings.Join(args[1:], " ")
+
+	var targetUser models.User
+	if err := database.DB.Where("username = ?", username).First(&targetUser).Error; err != nil {
+		return "", fmt.Errorf("user not found: @%s", username)
+	}
+
+	// Create report
+	report := models.Report{
+		ReporterID: user.ID,
+		ReportedID: targetUser.ID,
+		Reason:     reason,
+		IsRead:     false,
+	}
+	if err := database.DB.Create(&report).Error; err != nil {
+		return "", fmt.Errorf("failed to create report: %w", err)
+	}
+
+	// Save report to file in mounted folder
+	reportsDir := getEnv("REPORTS_DIR", "./reports")
+	// Create reports directory if it doesn't exist
+	if err := ensureDir(reportsDir); err != nil {
+		logAction(user, "report", fmt.Sprintf("Reported %s but failed to create report file: %v", username, err))
+	} else {
+		reportFile := fmt.Sprintf("%s/report@%s.log", reportsDir, username)
+		timestamp := time.Now().Format("2006-01-02 15:04:05")
+		reportContent := fmt.Sprintf("[%s] Reported by @%s: %s\n", timestamp, user.Username, reason)
+		
+		// Append to report file
+		f, err := openFile(reportFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
+			f.WriteString(reportContent)
+			f.Close()
+		}
+	}
+
+	logAction(user, "report", fmt.Sprintf("Reported %s: %s", username, reason))
+
+	return fmt.Sprintf("Report submitted for @%s", username), nil
+}
+
+func handleReports(user *models.User, args []string) (string, error) {
+	var reports []models.Report
+	if err := database.DB.Preload("Reporter").Preload("Reported").
+		Where("is_read = ?", false).
+		Order("created_at ASC").
+		Find(&reports).Error; err != nil {
+		return "", fmt.Errorf("failed to fetch reports: %w", err)
+	}
+
+	if len(reports) == 0 {
+		return "No unread reports", nil
+	}
+
+	var result strings.Builder
+	result.WriteString("=== Unread Reports ===\n")
+	for i, report := range reports {
+		result.WriteString(fmt.Sprintf("%d. @%s reported @%s: %s\n",
+			i+1, report.Reporter.Username, report.Reported.Username, report.Reason))
+	}
+	result.WriteString("\nUse /markreports to mark all as read\n")
+
+	return result.String(), nil
+}
+
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+func ensureDir(dir string) error {
+	return os.MkdirAll(dir, 0755)
+}
+
+func openFile(path string, flag int, perm os.FileMode) (*os.File, error) {
+	return os.OpenFile(path, flag, perm)
+}
+
+func sendToAllAdmins(user *models.User, message string) (string, error) {
+	var admins []models.User
+	if err := database.DB.Where("is_admin = ?", true).Find(&admins).Error; err != nil {
+		return "", fmt.Errorf("failed to fetch admins: %w", err)
+	}
+
+	if len(admins) == 0 {
+		return "", fmt.Errorf("no admins found")
+	}
+
+	count := 0
+	for _, admin := range admins {
+		if admin.ID == user.ID {
+			continue // Don't send to yourself
+		}
+		
+		chatMsg := models.ChatMessage{
+			UserID:      user.ID,
+			Content:     message,
+			IsPrivate:   true,
+			RecipientID: &admin.ID,
+		}
+		
+		if err := database.DB.Create(&chatMsg).Error; err == nil {
+			count++
+		}
+	}
+
+	if count == 0 {
+		return "No other admins to message", nil
+	}
+
+	return fmt.Sprintf("Private message sent to %d admin(s)", count), nil
 }

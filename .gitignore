@@ -3,3 +3,4 @@ ssh_host_key
 *.log
 schat
 /schat
+reports/

@@ -327,12 +327,15 @@ func handleRegistration(channel ssh.Channel, username string) {
 
 	if isFirstUser {
 		fmt.Fprintf(channel, "\r\nRegistration successful! You are the first user and have been granted admin privileges.\r\n")
-		fmt.Fprintf(channel, "Please reconnect to login.\r\n")
 	} else {
-		fmt.Fprintf(channel, "\r\nRegistration successful! Please reconnect to login.\r\n")
+		fmt.Fprintf(channel, "\r\nRegistration successful!\r\n")
 	}
 
 	logAction(newUser, "register", "User registered")
+
+	// Immediately authenticate and proceed to chat without reconnection
+	fmt.Fprintf(channel, "Connecting to chat...\r\n\r\n")
+	handleAuthenticatedUser(channel, newUser)
 }
 
 func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
@@ -386,6 +389,12 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 	}
 	fmt.Fprintf(channel, "Type /help for available commands.\n")
 	fmt.Fprintf(channel, "\n")
+
+	// Show chat history (last 10 events)
+	showChatHistory(channel, user)
+
+	// Check for unread mentions and private messages
+	showUnreadNotifications(channel, user)
 
 	// Broadcast join message
 	if user.CurrentRoomID != nil {
@@ -459,22 +468,31 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 			}
 			cmd := commands.GetCommand(cmdName)
 			if cmd != nil {
-				// Commands that take username as argument
+				// Commands that take username as argument - require @ prefix
 				usernameCommands := map[string]bool{
 					"msg": true, "pm": true, "whisper": true, "w": true,
 					"ban": true, "b": true, "kick": true, "k": true,
 					"mute": true, "silence": true, "unban": true, "ub": true,
 					"unmute": true, "um": true, "promote": true, "makeadmin": true,
 					"demote": true, "removeadmin": true, "deleteuser": true,
-					"deluser": true, "removeuser": true,
+					"deluser": true, "removeuser": true, "report": true, "reportuser": true,
 				}
 				if usernameCommands[cmdName] {
+					// Ensure @ prefix for username completion
 					userPrefix := wordToComplete
+					if !strings.HasPrefix(userPrefix, "@") {
+						return "", 0, false
+					}
+					userPrefix = userPrefix[1:]
+					
+					// Add "admin" as a special completion option
+					completions = append(completions, "@admin")
+					
 					var users []models.User
 					// Use database filtering for efficiency
 					database.DB.Where("username LIKE ?", userPrefix+"%").Limit(10).Find(&users)
 					for _, u := range users {
-						completions = append(completions, u.Username)
+						completions = append(completions, "@"+u.Username)
 					}
 				}
 			}
@@ -610,6 +628,31 @@ func handleMessage(client *Client, message string) {
 	for _, word := range words {
 		if strings.HasPrefix(word, "@") && len(word) > 1 {
 			mentionedUsername := strings.TrimPrefix(word, "@")
+			
+			// Handle @admin - notify all admins
+			if mentionedUsername == "admin" {
+				var admins []models.User
+				database.DB.Where("is_admin = ?", true).Find(&admins)
+				for _, admin := range admins {
+					if admin.ID == client.User.ID {
+						continue // Don't create mention for yourself
+					}
+					mention := models.Mention{
+						UserID:    admin.ID,
+						MessageID: chatMsg.ID,
+					}
+					database.DB.Create(&mention)
+
+					// Send bell notification
+					server.mutex.RLock()
+					if adminClient, ok := server.clients[admin.ID]; ok {
+						adminClient.Terminal.Write([]byte("\a"))
+					}
+					server.mutex.RUnlock()
+				}
+				continue
+			}
+			
 			var mentionedUser models.User
 			if err := database.DB.Where("username = ? OR nickname = ?", mentionedUsername, mentionedUsername).
 				First(&mentionedUser).Error; err == nil {
@@ -743,4 +786,81 @@ func logAction(user *models.User, action string, details string) {
 		Details: details,
 	}
 	database.DB.Create(&log)
+}
+
+func showChatHistory(channel ssh.Channel, user *models.User) {
+	if user.CurrentRoomID == nil {
+		return
+	}
+
+	// Get last 10 messages and audit logs (for joins) from the current room
+	var messages []models.ChatMessage
+	database.DB.Where("room_id = ?", user.CurrentRoomID).
+		Preload("User").
+		Order("created_at DESC").
+		Limit(10).
+		Find(&messages)
+
+	if len(messages) == 0 {
+		fmt.Fprintf(channel, "--- No recent messages ---\n\n")
+		return
+	}
+
+	fmt.Fprintf(channel, "--- Last %d messages ---\n", len(messages))
+	
+	// Reverse to show oldest first
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		displayName := msg.User.Username
+		if msg.User.Nickname != "" {
+			displayName = msg.User.Nickname
+		}
+		
+		// Format message
+		content := msg.Content
+		if strings.HasPrefix(content, "@me ") {
+			// Emote
+			fmt.Fprintf(channel, "* %s %s\n", displayName, content[4:])
+		} else if strings.Contains(content, "@me") {
+			// Inline @me
+			fmt.Fprintf(channel, "%s\n", strings.ReplaceAll(content, "@me", displayName))
+		} else {
+			// Normal message
+			fmt.Fprintf(channel, "%s: %s\n", displayName, content)
+		}
+	}
+	fmt.Fprintf(channel, "--- End of history ---\n\n")
+}
+
+func showUnreadNotifications(channel ssh.Channel, user *models.User) {
+	// Check for unread mentions
+	var mentionCount int64
+	database.DB.Model(&models.Mention{}).Where("user_id = ? AND is_read = ?", user.ID, false).Count(&mentionCount)
+
+	// Check for unread private messages
+	var pmCount int64
+	database.DB.Model(&models.ChatMessage{}).
+		Where("recipient_id = ? AND is_private = ? AND created_at > ?", user.ID, true, user.LastSeenAt).
+		Count(&pmCount)
+
+	if mentionCount > 0 || pmCount > 0 {
+		fmt.Fprintf(channel, "*** You have unread messages! ***\n")
+		if mentionCount > 0 {
+			fmt.Fprintf(channel, "  - %d unread mention(s)\n", mentionCount)
+		}
+		if pmCount > 0 {
+			fmt.Fprintf(channel, "  - %d unread private message(s)\n", pmCount)
+		}
+		fmt.Fprintf(channel, "Type /news to view them.\n\n")
+	}
+
+	// Check for unread reports (admin only)
+	if user.IsAdmin {
+		var reportCount int64
+		database.DB.Model(&models.Report{}).Where("is_read = ?", false).Count(&reportCount)
+		if reportCount > 0 {
+			fmt.Fprintf(channel, "*** You have %d unread report(s) from users. ***\n", reportCount)
+			fmt.Fprintf(channel, "Type /reports to view them.\n\n")
+		}
+	}
 }
