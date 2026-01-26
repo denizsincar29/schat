@@ -6,13 +6,16 @@ A feature-rich SSH-based chat application written in Go with support for user re
 
 - **Seamless SSH Connection Handling**: Connect via SSH with password or key-based authentication
 - **User Registration**: Easy registration process via SSH
-- **Admin Roles**: Elevated privileges for administrators
+- **Admin Roles**: Elevated privileges for administrators (first user is auto-admin)
+- **Admin Management**: Promote/demote users and manage the admin team
+- **Tab Completion**: Smart autocomplete for commands, usernames, and room names
 - **Real-time Chat**: Instant messaging with other users
 - **Room Support**: Create and join multiple chat rooms
 - **Private Messages**: Direct messaging between users
 - **Mentions**: @mention users and get notifications
 - **User Profiles**: Nicknames and status messages
 - **Moderation Tools**: Ban, kick, and mute users with duration control
+- **User Management**: Admins can delete users
 - **Emotes**: Express yourself with /me commands
 - **Audit Logging**: Track all user actions and messages
 - **Bell Notifications**: Optional sound notifications for mentions
@@ -39,6 +42,10 @@ A feature-rich SSH-based chat application written in Go with support for user re
 - `/mute <user> <duration> [reason]` - Mute a user
 - `/unban <user>` - Unban a user
 - `/unmute <user>` - Unmute a user
+- `/promote <user>` - Promote a user to admin
+- `/demote <user>` - Remove admin privileges from a user
+- `/deleteuser <user>` - Delete a user permanently
+- `/admins` - List all admins (available to all users)
 
 Duration format: `5m`, `2h`, `1:30` (MM:SS), or `1:30:00` (HH:MM:SS)
 
@@ -183,7 +190,9 @@ The application uses the following tables:
 
 ## Admin Setup
 
-To create an admin user, you can manually update the database after registration:
+The first user to register is automatically granted admin privileges. Admins can then promote other users to admin using the `/promote <username>` command.
+
+Alternatively, you can manually update the database after registration:
 
 ```sql
 UPDATE users SET is_admin = true WHERE username = 'your_username';
