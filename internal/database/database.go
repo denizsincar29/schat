@@ -42,19 +42,43 @@ func Init() error {
 func Migrate() error {
 	log.Println("Running database migrations...")
 
-	// Migrate all models (foreign key constraints are disabled in DB config)
-	err := DB.AutoMigrate(
-		&models.Settings{},
-		&models.User{},
-		&models.Room{},
+	// Create tables in order without foreign key constraints
+	// Settings table (no dependencies)
+	if err := DB.AutoMigrate(&models.Settings{}); err != nil {
+		return fmt.Errorf("failed to migrate settings: %w", err)
+	}
+
+	// User and Room tables separately to avoid circular dependency
+	// Create User table first
+	if err := DB.Migrator().CreateTable(&models.User{}); err != nil {
+		// Table might already exist, try AutoMigrate instead
+		if err := DB.AutoMigrate(&models.User{}); err != nil {
+			return fmt.Errorf("failed to migrate users: %w", err)
+		}
+	}
+
+	// Create Room table after User exists
+	if err := DB.Migrator().CreateTable(&models.Room{}); err != nil {
+		// Table might already exist, try AutoMigrate instead
+		if err := DB.AutoMigrate(&models.Room{}); err != nil {
+			return fmt.Errorf("failed to migrate rooms: %w", err)
+		}
+	}
+
+	// Now migrate User again to add any missing columns/indexes
+	if err := DB.AutoMigrate(&models.User{}); err != nil {
+		return fmt.Errorf("failed to update users: %w", err)
+	}
+
+	// Migrate remaining tables that depend on User and/or Room
+	if err := DB.AutoMigrate(
 		&models.ChatMessage{},
 		&models.Ban{},
 		&models.Mute{},
 		&models.Mention{},
 		&models.AuditLog{},
-	)
-	if err != nil {
-		return fmt.Errorf("failed to run migrations: %w", err)
+	); err != nil {
+		return fmt.Errorf("failed to migrate dependent tables: %w", err)
 	}
 
 	// Create default room
