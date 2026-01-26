@@ -362,6 +362,9 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 		delete(server.clients, user.ID)
 		server.mutex.Unlock()
 
+		// Update last seen timestamp on disconnect
+		user.LastSeenAt = time.Now()
+
 		// Clear current room
 		user.CurrentRoomID = nil
 		database.DB.Save(user)

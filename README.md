@@ -53,6 +53,7 @@ A feature-rich SSH-based chat application written in Go with support for user re
 - `/deleteuser @username` - Delete a user permanently
 - `/admins` - List all admins (available to all users)
 - `/reports` - View user reports
+- `/markreports` - Mark all reports as read
 
 Duration format: `5m`, `2h`, `1:30` (MM:SS), or `1:30:00` (HH:MM:SS)
 

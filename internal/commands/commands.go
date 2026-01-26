@@ -220,6 +220,15 @@ func init() {
 		Handler:     handleReports,
 		AdminOnly:   true,
 	})
+
+	registerCommand(&Command{
+		Name:        "markreports",
+		Aliases:     []string{"readreports"},
+		Description: "Mark all reports as read (admin only)",
+		Usage:       "/markreports",
+		Handler:     handleMarkReports,
+		AdminOnly:   true,
+	})
 }
 
 func registerCommand(cmd *Command) {
@@ -998,4 +1007,17 @@ func sendToAllAdmins(user *models.User, message string) (string, error) {
 	}
 
 	return fmt.Sprintf("Private message sent to %d admin(s)", count), nil
+}
+
+func handleMarkReports(user *models.User, args []string) (string, error) {
+	result := database.DB.Model(&models.Report{}).Where("is_read = ?", false).Update("is_read", true)
+	if result.Error != nil {
+		return "", fmt.Errorf("failed to mark reports as read: %w", result.Error)
+	}
+
+	if result.RowsAffected == 0 {
+		return "No unread reports to mark", nil
+	}
+
+	return fmt.Sprintf("Marked %d report(s) as read", result.RowsAffected), nil
 }
