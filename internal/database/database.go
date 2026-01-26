@@ -42,32 +42,19 @@ func Init() error {
 func Migrate() error {
 	log.Println("Running database migrations...")
 
-	// Create tables in order without foreign key constraints
+	// Migrate tables in dependency order
+	// With DisableForeignKeyConstraintWhenMigrating=true, GORM won't create FK constraints,
+	// allowing us to migrate tables with circular dependencies
+
 	// Settings table (no dependencies)
 	if err := DB.AutoMigrate(&models.Settings{}); err != nil {
 		return fmt.Errorf("failed to migrate settings: %w", err)
 	}
 
-	// User and Room tables separately to avoid circular dependency
-	// Create User table first
-	if err := DB.Migrator().CreateTable(&models.User{}); err != nil {
-		// Table might already exist, try AutoMigrate instead
-		if err := DB.AutoMigrate(&models.User{}); err != nil {
-			return fmt.Errorf("failed to migrate users: %w", err)
-		}
-	}
-
-	// Create Room table after User exists
-	if err := DB.Migrator().CreateTable(&models.Room{}); err != nil {
-		// Table might already exist, try AutoMigrate instead
-		if err := DB.AutoMigrate(&models.Room{}); err != nil {
-			return fmt.Errorf("failed to migrate rooms: %w", err)
-		}
-	}
-
-	// Now migrate User again to add any missing columns/indexes
-	if err := DB.AutoMigrate(&models.User{}); err != nil {
-		return fmt.Errorf("failed to update users: %w", err)
+	// User and Room tables have circular dependency (User.CurrentRoom <-> Room.Creator)
+	// Migrate them in sequence - User first, then Room
+	if err := DB.AutoMigrate(&models.User{}, &models.Room{}); err != nil {
+		return fmt.Errorf("failed to migrate users and rooms: %w", err)
 	}
 
 	// Migrate remaining tables that depend on User and/or Room
@@ -81,7 +68,7 @@ func Migrate() error {
 		return fmt.Errorf("failed to migrate dependent tables: %w", err)
 	}
 
-	// Create default room
+	// Create default room if it doesn't exist
 	var count int64
 	DB.Model(&models.Room{}).Count(&count)
 	if count == 0 {
