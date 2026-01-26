@@ -115,6 +115,27 @@ docker compose up -d
 
 ### Connecting
 
+#### Easy Setup with Helper Script
+
+The `schat-connect.sh` script automates SSH key generation and configuration:
+
+```bash
+# Generate SSH key, configure SSH client, and connect
+./schat-connect.sh username@hostname [port]
+
+# Examples:
+./schat-connect.sh myuser@chat.example.com
+./schat-connect.sh myuser@localhost 2222
+```
+
+The script will:
+1. Generate a new SSH key pair in `~/.ssh/`
+2. Add an entry to your SSH config
+3. Display your public key to add via `/addkey` command
+4. Optionally connect you to the chat
+
+#### Manual Connection
+
 **Registration (first-time users):**
 ```bash
 # Connect with keyboard-interactive auth for registration
@@ -133,7 +154,12 @@ ssh -p 2222 username@localhost
 sshpass -p 'yourpassword' ssh -p 2222 username@localhost
 ```
 
-**Note:** After registration, you must reconnect to login with your credentials.
+**Adding SSH key to existing password account:**
+1. Login with your password
+2. Run `/addkey` (or `/addkey pp` to keep password)
+3. Paste your public key (e.g., from `~/.ssh/id_rsa.pub`)
+4. Type `END` on a new line
+5. Reconnect using your SSH key
 
 ## Manual Setup (without Docker)
 

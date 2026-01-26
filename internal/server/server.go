@@ -643,6 +643,25 @@ func handleAddKey(client *Client, args []string) {
 			return
 		}
 		line = strings.TrimSpace(line)
+		
+		// Check for private key markers - prevent users from pasting private keys
+		if strings.Contains(line, "BEGIN") && (strings.Contains(line, "PRIVATE KEY") || strings.Contains(line, "RSA PRIVATE KEY") || strings.Contains(line, "OPENSSH PRIVATE KEY")) {
+			fmt.Fprintf(client.Conn, "\n⚠️  WARNING: You appear to be pasting a PRIVATE key!\n")
+			fmt.Fprintf(client.Conn, "You should NEVER share your private key. Please paste your PUBLIC key instead.\n")
+			fmt.Fprintf(client.Conn, "Your public key file typically has a .pub extension (e.g., id_rsa.pub)\n\n")
+			client.Terminal.SetPrompt(originalPrompt)
+			return
+		}
+		
+		// Also check for END markers of private keys
+		if strings.Contains(line, "END") && (strings.Contains(line, "PRIVATE KEY") || strings.Contains(line, "RSA PRIVATE KEY") || strings.Contains(line, "OPENSSH PRIVATE KEY")) {
+			fmt.Fprintf(client.Conn, "\n⚠️  WARNING: You appear to be pasting a PRIVATE key!\n")
+			fmt.Fprintf(client.Conn, "You should NEVER share your private key. Please paste your PUBLIC key instead.\n")
+			fmt.Fprintf(client.Conn, "Your public key file typically has a .pub extension (e.g., id_rsa.pub)\n\n")
+			client.Terminal.SetPrompt(originalPrompt)
+			return
+		}
+		
 		if line == "END" {
 			break
 		}
