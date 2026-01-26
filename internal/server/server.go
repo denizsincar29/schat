@@ -228,7 +228,11 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *s
 		// Check if user_id is set (authenticated user)
 		if sshConn.Permissions.Extensions["user_id"] != "" {
 			var userID uint
-			fmt.Sscanf(sshConn.Permissions.Extensions["user_id"], "%d", &userID)
+			n, err := fmt.Sscanf(sshConn.Permissions.Extensions["user_id"], "%d", &userID)
+			if err != nil || n != 1 || userID == 0 {
+				fmt.Fprintf(channel, "Invalid user ID in session. Please try again.\r\n")
+				return
+			}
 			if err := database.DB.First(&user, userID).Error; err == nil {
 				// User is authenticated
 				handleAuthenticatedUser(channel, user)
