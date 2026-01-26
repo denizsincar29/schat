@@ -1,0 +1,226 @@
+# schat - SSH Chat Application
+
+A feature-rich SSH-based chat application written in Go with support for user registration, admin roles, real-time messaging, and PostgreSQL database integration.
+
+## Features
+
+- **Seamless SSH Connection Handling**: Connect via SSH with password or key-based authentication
+- **User Registration**: Easy registration process via SSH
+- **Admin Roles**: Elevated privileges for administrators
+- **Real-time Chat**: Instant messaging with other users
+- **Room Support**: Create and join multiple chat rooms
+- **Private Messages**: Direct messaging between users
+- **Mentions**: @mention users and get notifications
+- **User Profiles**: Nicknames and status messages
+- **Moderation Tools**: Ban, kick, and mute users with duration control
+- **Emotes**: Express yourself with /me commands
+- **Audit Logging**: Track all user actions and messages
+- **Bell Notifications**: Optional sound notifications for mentions
+- **Screenreader Friendly**: Clean text-based UI without ASCII art
+
+## Commands
+
+- `/help` - Show available commands
+- `/rooms` - List available rooms
+- `/join <room>` - Join a room
+- `/create <room> [description]` - Create a new room
+- `/msg <user> <message>` - Send a private message
+- `/nick <nickname>` - Set your nickname
+- `/status <message>` - Set your status message
+- `/users` - List users in current room
+- `/mentions` - View unread mentions
+- `/bell` - Toggle bell notifications
+- `/me <action>` - Send an emote
+
+### Admin Commands
+
+- `/ban <user> <duration> [reason]` - Ban a user
+- `/kick <user> <duration> [reason]` - Kick a user
+- `/mute <user> <duration> [reason]` - Mute a user
+- `/unban <user>` - Unban a user
+- `/unmute <user>` - Unmute a user
+
+Duration format: `5m`, `2h`, `1:30` (MM:SS), or `1:30:00` (HH:MM:SS)
+
+## Setup with Docker
+
+### Prerequisites
+
+- Docker
+- Docker Compose
+
+### Installation
+
+1. Clone the repository:
+```bash
+git clone https://github.com/denizsincar29/schat.git
+cd schat
+```
+
+2. Run the setup script:
+```bash
+./setup.sh
+```
+
+3. Start the application:
+```bash
+docker compose up -d
+```
+
+4. View logs:
+```bash
+docker compose logs -f
+```
+
+### Updating After Git Pull
+
+If you pull new changes from the repository, you need to rebuild the Docker containers:
+
+```bash
+# Stop the current containers
+docker compose down
+
+# Rebuild the images with new code
+docker compose build
+
+# Start the containers again
+docker compose up -d
+```
+
+**Note:** If you encounter database migration errors, you may need to reset the database:
+
+```bash
+# Stop and remove containers and volumes (WARNING: This deletes all data!)
+docker compose down -v
+
+# Start fresh
+docker compose up -d
+```
+
+### Connecting
+
+Connect to the SSH server:
+```bash
+ssh -p 2222 username@localhost
+```
+
+For first-time users, connect without a username to register:
+```bash
+ssh -p 2222 localhost
+```
+
+## Manual Setup (without Docker)
+
+### Prerequisites
+
+- Go 1.24 or later
+- PostgreSQL 12 or later
+
+### Installation
+
+1. Clone the repository:
+```bash
+git clone https://github.com/denizsincar29/schat.git
+cd schat
+```
+
+2. Install dependencies:
+```bash
+go mod download
+```
+
+3. Set up environment variables:
+```bash
+cp .env.example .env
+# Edit .env with your configuration
+```
+
+4. Create PostgreSQL database:
+```bash
+createdb schat
+```
+
+5. Build and run:
+```bash
+go build -o schat .
+./schat
+```
+
+## Configuration
+
+Configuration is done via environment variables:
+
+- `DB_HOST` - Database host (default: localhost)
+- `DB_PORT` - Database port (default: 5432)
+- `DB_USER` - Database user (default: postgres)
+- `DB_PASSWORD` - Database password (default: postgres)
+- `DB_NAME` - Database name (default: schat)
+- `DB_SSLMODE` - SSL mode (default: disable)
+- `SSH_PORT` - SSH server port (default: 2222)
+- `SSH_HOST_KEY` - Path to SSH host key (default: ./ssh_host_key)
+
+## Database Schema
+
+The application uses the following tables:
+- `users` - User accounts and settings
+- `rooms` - Chat rooms
+- `chat_messages` - Chat message history
+- `bans` - User ban records
+- `mutes` - User mute records
+- `mentions` - User mention tracking
+- `audit_logs` - Action logging
+- `settings` - Global settings
+
+## Admin Setup
+
+To create an admin user, you can manually update the database after registration:
+
+```sql
+UPDATE users SET is_admin = true WHERE username = 'your_username';
+```
+
+## Security
+
+- Passwords are hashed using Argon2id
+- SSH key authentication supported
+- All actions are logged for audit purposes
+- Admin-only commands are protected
+
+## Development
+
+### Project Structure
+
+```
+schat/
+├── main.go                 # Application entry point
+├── internal/
+│   ├── server/            # SSH server implementation
+│   ├── models/            # Database models
+│   ├── database/          # Database connection and migrations
+│   ├── auth/              # Authentication logic
+│   └── commands/          # Command handlers
+├── docker-compose.yml     # Docker Compose configuration
+├── Dockerfile             # Docker build configuration
+└── setup.sh              # Setup script
+```
+
+### Building
+
+```bash
+go build -o schat .
+```
+
+### Testing
+
+Connect to the server:
+```bash
+ssh -p 2222 localhost
+```
+
+## License
+
+MIT License
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
