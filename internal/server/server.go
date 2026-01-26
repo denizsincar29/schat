@@ -649,11 +649,7 @@ func broadcastToRoom(roomID uint, message string, excludeUserID uint) {
 		if client.User.CurrentRoomID != nil && *client.User.CurrentRoomID == roomID {
 			client.Mutex.Lock()
 			// Use terminal.Write to properly display messages above the input line
-			if client.Terminal != nil {
-				client.Terminal.Write([]byte(message + "\r\n"))
-			} else {
-				fmt.Fprintf(client.Conn, "%s\n", message)
-			}
+			client.Terminal.Write([]byte(message + "\r\n"))
 			client.Mutex.Unlock()
 		}
 	}
