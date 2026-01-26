@@ -5,17 +5,21 @@ A feature-rich SSH-based chat application written in Go with support for user re
 ## Features
 
 - **Seamless SSH Connection Handling**: Connect via SSH with password or key-based authentication
-- **User Registration**: Easy registration process via SSH
+- **User Registration**: Easy registration process via SSH - no reconnection needed after registration
 - **Admin Roles**: Elevated privileges for administrators (first user is auto-admin)
 - **Admin Management**: Promote/demote users and manage the admin team
-- **Tab Completion**: Smart autocomplete for commands, usernames, and room names
+- **Tab Completion**: Smart autocomplete for commands, usernames (with @ prefix), and room names
 - **Real-time Chat**: Instant messaging with other users
+- **Chat History**: See last 10 messages when connecting to chat
 - **Room Support**: Create and join multiple chat rooms
-- **Private Messages**: Direct messaging between users
-- **Mentions**: @mention users and get notifications
+- **Private Messages**: Direct messaging between users (can send to offline users)
+- **Mentions**: @mention users and get notifications (can mention offline users)
+- **Offline Notifications**: Get notified about missed mentions and private messages
+- **Admin Mentions**: @admin mentions all administrators
 - **User Profiles**: Nicknames and status messages
 - **Moderation Tools**: Ban, kick, and mute users with duration control
 - **User Management**: Admins can delete users
+- **User Reports**: Report users to admins with /report command
 - **Emotes**: Express yourself with /me commands
 - **Audit Logging**: Track all user actions and messages
 - **Bell Notifications**: Optional sound notifications for mentions
@@ -27,25 +31,30 @@ A feature-rich SSH-based chat application written in Go with support for user re
 - `/rooms` - List available rooms
 - `/join <room>` - Join a room
 - `/create <room> [description]` - Create a new room
-- `/msg <user> <message>` - Send a private message
+- `/msg @username <message>` - Send a private message
 - `/nick <nickname>` - Set your nickname
 - `/status <message>` - Set your status message
 - `/users` - List users in current room
 - `/mentions` - View unread mentions
+- `/news` - View unread mentions and private messages
 - `/bell` - Toggle bell notifications
 - `/me <action>` - Send an emote
+- `/addkey [pp]` - Add SSH key (replaces password unless `pp` flag is used)
+- `/report @username <reason>` - Report a user to admins
 
 ### Admin Commands
 
-- `/ban <user> <duration> [reason]` - Ban a user
-- `/kick <user> <duration> [reason]` - Kick a user
-- `/mute <user> <duration> [reason]` - Mute a user
-- `/unban <user>` - Unban a user
-- `/unmute <user>` - Unmute a user
-- `/promote <user>` - Promote a user to admin
-- `/demote <user>` - Remove admin privileges from a user
-- `/deleteuser <user>` - Delete a user permanently
+- `/ban @username <duration> [reason]` - Ban a user
+- `/kick @username <duration> [reason]` - Kick a user
+- `/mute @username <duration> [reason]` - Mute a user
+- `/unban @username` - Unban a user
+- `/unmute @username` - Unmute a user
+- `/promote @username` - Promote a user to admin
+- `/demote @username` - Remove admin privileges from a user
+- `/deleteuser @username` - Delete a user permanently
 - `/admins` - List all admins (available to all users)
+- `/reports` - View user reports
+- `/markreports` - Mark all reports as read
 
 Duration format: `5m`, `2h`, `1:30` (MM:SS), or `1:30:00` (HH:MM:SS)
 
@@ -106,13 +115,34 @@ docker compose up -d
 
 ### Connecting
 
+#### Easy Setup with Helper Script
+
+The `schat-connect.sh` script automates SSH key generation and configuration:
+
+```bash
+# Generate SSH key, configure SSH client, and connect
+./schat-connect.sh username@hostname [port]
+
+# Examples:
+./schat-connect.sh myuser@chat.example.com
+./schat-connect.sh myuser@localhost 2222
+```
+
+The script will:
+1. Generate a new SSH key pair in `~/.ssh/`
+2. Add an entry to your SSH config
+3. Display your public key to add via `/addkey` command
+4. Optionally connect you to the chat
+
+#### Manual Connection
+
 **Registration (first-time users):**
 ```bash
 # Connect with keyboard-interactive auth for registration
 ssh -p 2222 -o PreferredAuthentications=keyboard-interactive newusername@localhost
 ```
 
-You'll be prompted to choose between password or SSH key authentication.
+You'll be prompted to choose between password or SSH key authentication. After registration, you are automatically connected to the chat!
 
 **Login (existing users):**
 ```bash
@@ -124,7 +154,12 @@ ssh -p 2222 username@localhost
 sshpass -p 'yourpassword' ssh -p 2222 username@localhost
 ```
 
-**Note:** After registration, you must reconnect to login with your credentials.
+**Adding SSH key to existing password account:**
+1. Login with your password
+2. Run `/addkey` (or `/addkey pp` to keep password)
+3. Paste your public key (e.g., from `~/.ssh/id_rsa.pub`)
+4. Type `END` on a new line
+5. Reconnect using your SSH key
 
 ## Manual Setup (without Docker)
 

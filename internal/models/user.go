@@ -89,3 +89,13 @@ type Settings struct {
 	Key   string `gorm:"unique;not null"`
 	Value string
 }
+
+type Report struct {
+	gorm.Model
+	ReporterID uint
+	Reporter   User   `gorm:"foreignKey:ReporterID"`
+	ReportedID uint
+	Reported   User   `gorm:"foreignKey:ReportedID"`
+	Reason     string `gorm:"type:text"`
+	IsRead     bool   `gorm:"default:false"`
+}

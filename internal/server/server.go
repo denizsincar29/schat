@@ -302,7 +302,8 @@ func handleRegistration(channel ssh.Channel, username string) {
 				keyLines = append(keyLines, line)
 			}
 		}
-		sshKey = strings.Join(keyLines, "\n")
+		// SSH public keys should be on a single line (join wrapped lines with spaces)
+		sshKey = strings.Join(keyLines, " ")
 
 		if sshKey == "" {
 			fmt.Fprintf(channel, "SSH key cannot be empty\r\n")
@@ -327,12 +328,15 @@ func handleRegistration(channel ssh.Channel, username string) {
 
 	if isFirstUser {
 		fmt.Fprintf(channel, "\r\nRegistration successful! You are the first user and have been granted admin privileges.\r\n")
-		fmt.Fprintf(channel, "Please reconnect to login.\r\n")
 	} else {
-		fmt.Fprintf(channel, "\r\nRegistration successful! Please reconnect to login.\r\n")
+		fmt.Fprintf(channel, "\r\nRegistration successful!\r\n")
 	}
 
 	logAction(newUser, "register", "User registered")
+
+	// Immediately authenticate and proceed to chat without reconnection
+	fmt.Fprintf(channel, "Connecting to chat...\r\n\r\n")
+	handleAuthenticatedUser(channel, newUser)
 }
 
 func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
@@ -358,6 +362,9 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 		server.mutex.Lock()
 		delete(server.clients, user.ID)
 		server.mutex.Unlock()
+
+		// Update last seen timestamp on disconnect
+		user.LastSeenAt = time.Now()
 
 		// Clear current room
 		user.CurrentRoomID = nil
@@ -386,6 +393,12 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 	}
 	fmt.Fprintf(channel, "Type /help for available commands.\n")
 	fmt.Fprintf(channel, "\n")
+
+	// Show chat history (last 10 events)
+	showChatHistory(channel, user)
+
+	// Check for unread mentions and private messages
+	showUnreadNotifications(channel, user)
 
 	// Broadcast join message
 	if user.CurrentRoomID != nil {
@@ -459,22 +472,31 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 			}
 			cmd := commands.GetCommand(cmdName)
 			if cmd != nil {
-				// Commands that take username as argument
+				// Commands that take username as argument - require @ prefix
 				usernameCommands := map[string]bool{
 					"msg": true, "pm": true, "whisper": true, "w": true,
 					"ban": true, "b": true, "kick": true, "k": true,
 					"mute": true, "silence": true, "unban": true, "ub": true,
 					"unmute": true, "um": true, "promote": true, "makeadmin": true,
 					"demote": true, "removeadmin": true, "deleteuser": true,
-					"deluser": true, "removeuser": true,
+					"deluser": true, "removeuser": true, "report": true, "reportuser": true,
 				}
 				if usernameCommands[cmdName] {
+					// Ensure @ prefix for username completion
 					userPrefix := wordToComplete
+					if !strings.HasPrefix(userPrefix, "@") {
+						return "", 0, false
+					}
+					userPrefix = userPrefix[1:]
+					
+					// Add "admin" as a special completion option
+					completions = append(completions, "@admin")
+					
 					var users []models.User
 					// Use database filtering for efficiency
 					database.DB.Where("username LIKE ?", userPrefix+"%").Limit(10).Find(&users)
 					for _, u := range users {
-						completions = append(completions, u.Username)
+						completions = append(completions, "@"+u.Username)
 					}
 				}
 			}
@@ -539,6 +561,14 @@ func handleCommand(client *Client, line string) {
 	cmdName := strings.ToLower(parts[0])
 	args := parts[1:]
 
+	// Special handling for /addkey command which requires multiline input
+	// This bypasses the standard command system because the Command handler
+	// signature doesn't support interactive multiline input from the terminal
+	if cmdName == "addkey" {
+		handleAddKey(client, args)
+		return
+	}
+
 	cmd := commands.GetCommand(cmdName)
 	if cmd == nil {
 		fmt.Fprintf(client.Conn, "Unknown command: %s\n", cmdName)
@@ -564,6 +594,131 @@ func handleCommand(client *Client, line string) {
 			fmt.Fprintf(client.Conn, "%s\n", result)
 		}
 	}
+}
+
+func handleAddKey(client *Client, args []string) {
+	// Check if user already has an SSH key
+	if client.User.SSHKey != "" {
+		fmt.Fprintf(client.Conn, "You already have an SSH key configured. To replace it, contact an admin.\n")
+		return
+	}
+
+	// Check if user has a password - this ensures they have at least one auth method
+	// if SSH key validation fails, preventing lockout
+	if client.User.PasswordHash == "" {
+		fmt.Fprintf(client.Conn, "Error: Cannot add SSH key without a password set. Please contact an admin.\n")
+		return
+	}
+
+	// Parse flags - only accept recognized flags
+	preservePassword := false
+	for _, arg := range args {
+		argLower := strings.ToLower(arg)
+		if argLower == "preserve-password" || argLower == "pp" || argLower == "keep-password" {
+			preservePassword = true
+		} else {
+			fmt.Fprintf(client.Conn, "Unknown flag: %s\n", arg)
+			fmt.Fprintf(client.Conn, "Usage: /addkey [pp|preserve-password|keep-password]\n")
+			return
+		}
+	}
+
+	fmt.Fprintf(client.Conn, "\nPaste your SSH public key below.\n")
+	fmt.Fprintf(client.Conn, "End with a line containing only 'END'\n")
+	if !preservePassword {
+		fmt.Fprintf(client.Conn, "\nNote: Your password will be removed after adding the SSH key.\n")
+		fmt.Fprintf(client.Conn, "Use '/addkey pp' to keep your password.\n")
+	}
+	fmt.Fprintf(client.Conn, "\n")
+
+	// Store original prompt to restore later
+	originalPrompt := "> "
+	client.Terminal.SetPrompt("")
+	var keyLines []string
+	for {
+		line, err := client.Terminal.ReadLine()
+		if err != nil {
+			fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+			client.Terminal.SetPrompt(originalPrompt)
+			return
+		}
+		line = strings.TrimSpace(line)
+		
+		// Check for private key markers - prevent users from pasting private keys
+		if isPrivateKeyMarker(line) {
+			fmt.Fprintf(client.Conn, "\n⚠️  WARNING: You appear to be pasting a PRIVATE key!\n")
+			fmt.Fprintf(client.Conn, "You should NEVER share your private key. Please paste your PUBLIC key instead.\n")
+			fmt.Fprintf(client.Conn, "Your public key file typically has a .pub extension (e.g., id_rsa.pub)\n\n")
+			client.Terminal.SetPrompt(originalPrompt)
+			return
+		}
+		
+		if line == "END" {
+			break
+		}
+		if line != "" {
+			keyLines = append(keyLines, line)
+		}
+	}
+
+	// SSH public keys should be on a single line (join wrapped lines with spaces)
+	sshKey := strings.Join(keyLines, " ")
+	if sshKey == "" {
+		fmt.Fprintf(client.Conn, "SSH key cannot be empty\n")
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+
+	// Validate SSH key format
+	_, _, _, _, err := ssh.ParseAuthorizedKey([]byte(sshKey))
+	if err != nil {
+		fmt.Fprintf(client.Conn, "Invalid SSH key format: %v\n", err)
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+
+	// Update user with SSH key
+	client.User.SSHKey = sshKey
+	
+	// Remove password unless preserve flag is set
+	if !preservePassword {
+		client.User.PasswordHash = ""
+	}
+	
+	if err := database.DB.Save(client.User).Error; err != nil {
+		fmt.Fprintf(client.Conn, "Failed to save SSH key: %v\n", err)
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+
+	logAction(client.User, "addkey", "Added SSH key to account")
+	fmt.Fprintf(client.Conn, "\nSSH key added successfully!\n")
+	if preservePassword {
+		fmt.Fprintf(client.Conn, "You can now login using either your password or SSH key.\n")
+	} else {
+		fmt.Fprintf(client.Conn, "Your password has been removed. You can now only login using your SSH key.\n")
+	}
+	
+	// Restore prompt
+	client.Terminal.SetPrompt(originalPrompt)
+}
+
+// isPrivateKeyMarker checks if a line contains markers indicating a private key
+func isPrivateKeyMarker(line string) bool {
+	lineUpper := strings.ToUpper(line)
+	// Check for various private key format markers
+	privateKeyIndicators := []string{
+		"PRIVATE KEY",     // Catches RSA, DSA, EC, OPENSSH PRIVATE KEY, etc.
+		"BEGIN PRIVATE",   // Additional safety
+		"END PRIVATE",     // Additional safety
+	}
+	
+	for _, indicator := range privateKeyIndicators {
+		if strings.Contains(lineUpper, indicator) {
+			return true
+		}
+	}
+	return false
 }
 
 func handleMessage(client *Client, message string) {
@@ -609,7 +764,34 @@ func handleMessage(client *Client, message string) {
 	words := strings.Fields(message)
 	for _, word := range words {
 		if strings.HasPrefix(word, "@") && len(word) > 1 {
+			// Strip trailing punctuation
 			mentionedUsername := strings.TrimPrefix(word, "@")
+			mentionedUsername = strings.TrimRight(mentionedUsername, ".,!?;:")
+			
+			// Handle @admin - notify all admins
+			if mentionedUsername == "admin" {
+				var admins []models.User
+				database.DB.Where("is_admin = ?", true).Find(&admins)
+				for _, admin := range admins {
+					if admin.ID == client.User.ID {
+						continue // Don't create mention for yourself
+					}
+					mention := models.Mention{
+						UserID:    admin.ID,
+						MessageID: chatMsg.ID,
+					}
+					database.DB.Create(&mention)
+
+					// Send bell notification
+					server.mutex.RLock()
+					if adminClient, ok := server.clients[admin.ID]; ok {
+						adminClient.Terminal.Write([]byte("\a"))
+					}
+					server.mutex.RUnlock()
+				}
+				continue
+			}
+			
 			var mentionedUser models.User
 			if err := database.DB.Where("username = ? OR nickname = ?", mentionedUsername, mentionedUsername).
 				First(&mentionedUser).Error; err == nil {
@@ -743,4 +925,81 @@ func logAction(user *models.User, action string, details string) {
 		Details: details,
 	}
 	database.DB.Create(&log)
+}
+
+func showChatHistory(channel ssh.Channel, user *models.User) {
+	if user.CurrentRoomID == nil {
+		return
+	}
+
+	// Get last 10 messages and audit logs (for joins) from the current room
+	var messages []models.ChatMessage
+	database.DB.Where("room_id = ?", user.CurrentRoomID).
+		Preload("User").
+		Order("created_at DESC").
+		Limit(10).
+		Find(&messages)
+
+	if len(messages) == 0 {
+		fmt.Fprintf(channel, "--- No recent messages ---\n\n")
+		return
+	}
+
+	fmt.Fprintf(channel, "--- Last %d messages ---\n", len(messages))
+	
+	// Reverse to show oldest first
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		displayName := msg.User.Username
+		if msg.User.Nickname != "" {
+			displayName = msg.User.Nickname
+		}
+		
+		// Format message
+		content := msg.Content
+		if strings.HasPrefix(content, "@me ") {
+			// Emote
+			fmt.Fprintf(channel, "* %s %s\n", displayName, content[4:])
+		} else if strings.Contains(content, "@me") {
+			// Inline @me
+			fmt.Fprintf(channel, "%s\n", strings.ReplaceAll(content, "@me", displayName))
+		} else {
+			// Normal message
+			fmt.Fprintf(channel, "%s: %s\n", displayName, content)
+		}
+	}
+	fmt.Fprintf(channel, "--- End of history ---\n\n")
+}
+
+func showUnreadNotifications(channel ssh.Channel, user *models.User) {
+	// Check for unread mentions
+	var mentionCount int64
+	database.DB.Model(&models.Mention{}).Where("user_id = ? AND is_read = ?", user.ID, false).Count(&mentionCount)
+
+	// Check for unread private messages
+	var pmCount int64
+	database.DB.Model(&models.ChatMessage{}).
+		Where("recipient_id = ? AND is_private = ? AND created_at > ?", user.ID, true, user.LastSeenAt).
+		Count(&pmCount)
+
+	if mentionCount > 0 || pmCount > 0 {
+		fmt.Fprintf(channel, "*** You have unread messages! ***\n")
+		if mentionCount > 0 {
+			fmt.Fprintf(channel, "  - %d unread mention(s)\n", mentionCount)
+		}
+		if pmCount > 0 {
+			fmt.Fprintf(channel, "  - %d unread private message(s)\n", pmCount)
+		}
+		fmt.Fprintf(channel, "Type /news to view them.\n\n")
+	}
+
+	// Check for unread reports (admin only)
+	if user.IsAdmin {
+		var reportCount int64
+		database.DB.Model(&models.Report{}).Where("is_read = ?", false).Count(&reportCount)
+		if reportCount > 0 {
+			fmt.Fprintf(channel, "*** You have %d unread report(s) from users. ***\n", reportCount)
+			fmt.Fprintf(channel, "Type /reports to view them.\n\n")
+		}
+	}
 }
