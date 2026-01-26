@@ -24,12 +24,12 @@ import (
 	"gorm.io/gorm"
 )
 
-
 type Client struct {
-	User    *models.User
-	Conn    ssh.Channel
-	Mutex   sync.Mutex
-	LastMsg time.Time
+	User     *models.User
+	Conn     ssh.Channel
+	Terminal *term.Terminal
+	Mutex    sync.Mutex
+	LastMsg  time.Time
 }
 
 type Server struct {
@@ -214,7 +214,7 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *s
 			handleRegistration(channel, sshConn.User())
 			return
 		}
-		
+
 		// Check if user_id is set (authenticated user)
 		if sshConn.Permissions.Extensions["user_id"] != "" {
 			var userID uint
@@ -340,11 +340,15 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 	user.LastSeenAt = time.Now()
 	database.DB.Save(user)
 
+	// Start reading input using term.Terminal for proper echo handling
+	terminal := term.NewTerminal(channel, "> ")
+
 	// Add client to server
 	client := &Client{
-		User:    user,
-		Conn:    channel,
-		LastMsg: time.Now(),
+		User:     user,
+		Conn:     channel,
+		Terminal: terminal,
+		LastMsg:  time.Now(),
 	}
 	server.mutex.Lock()
 	server.clients[user.ID] = client
@@ -390,9 +394,6 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 
 	logAction(user, "connect", "User connected")
 
-	// Start reading input using term.Terminal for proper echo handling
-	terminal := term.NewTerminal(channel, "> ")
-	
 	// Setup tab completion
 	terminal.AutoCompleteCallback = func(line string, pos int, key rune) (newLine string, newPos int, ok bool) {
 		// Only handle tab key
@@ -403,14 +404,14 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 		// Get the part before cursor
 		prefix := line[:pos]
 		suffix := line[pos:]
-		
+
 		// Find the word we're completing (last word in prefix)
 		words := strings.Fields(prefix)
 		if len(words) == 0 && len(prefix) > 0 && prefix[len(prefix)-1] == ' ' {
 			// Cursor is after a space, nothing to complete
 			return "", 0, false
 		}
-		
+
 		var wordToComplete string
 		var beforeWord string
 		if len(words) > 0 {
@@ -492,7 +493,7 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 		newPos = len(beforeWord + completion)
 		return newLine, newPos, true
 	}
-	
+
 	for {
 		line, err := terminal.ReadLine()
 		if err != nil {
@@ -619,12 +620,10 @@ func handleMessage(client *Client, message string) {
 				}
 				database.DB.Create(&mention)
 
-				// Send bell notification if enabled
+				// Send bell notification on mention (always)
 				server.mutex.RLock()
 				if mentionedClient, ok := server.clients[mentionedUser.ID]; ok {
-					if mentionedUser.BellEnabled {
-						mentionedClient.Conn.Write([]byte("\a"))
-					}
+					mentionedClient.Terminal.Write([]byte("\a"))
 				}
 				server.mutex.RUnlock()
 			}
@@ -647,7 +646,12 @@ func broadcastToRoom(roomID uint, message string, excludeUserID uint) {
 		}
 		if client.User.CurrentRoomID != nil && *client.User.CurrentRoomID == roomID {
 			client.Mutex.Lock()
-			fmt.Fprintf(client.Conn, "%s\n", message)
+			// Use terminal.Write to properly display messages above the input line
+			client.Terminal.Write([]byte(message + "\r\n"))
+			// Send bell notification if enabled for all incoming messages
+			if client.User.BellEnabled {
+				client.Terminal.Write([]byte("\a"))
+			}
 			client.Mutex.Unlock()
 		}
 	}

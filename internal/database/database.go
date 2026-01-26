@@ -84,6 +84,56 @@ func Migrate() error {
 	}
 
 	log.Println("Database migrations completed")
+
+	// Clean up soft-deleted users to prevent unique constraint violations
+	if err := cleanupSoftDeletedUsers(); err != nil {
+		log.Printf("Warning: failed to cleanup soft-deleted users: %v", err)
+		// Don't return error - this is a cleanup operation, not critical for startup
+	}
+
+	return nil
+}
+
+// cleanupSoftDeletedUsers removes soft-deleted users and their related data
+// This prevents unique constraint violations when trying to re-register with deleted usernames
+func cleanupSoftDeletedUsers() error {
+	log.Println("Cleaning up soft-deleted users...")
+
+	// Find all soft-deleted users (where deleted_at IS NOT NULL)
+	var softDeletedUsers []models.User
+	if err := DB.Unscoped().Where("deleted_at IS NOT NULL").Find(&softDeletedUsers).Error; err != nil {
+		return fmt.Errorf("failed to find soft-deleted users: %w", err)
+	}
+
+	if len(softDeletedUsers) == 0 {
+		log.Println("No soft-deleted users found")
+		return nil
+	}
+
+	log.Printf("Found %d soft-deleted user(s), cleaning up...", len(softDeletedUsers))
+
+	// Delete each user's related data and the user record (hard delete)
+	for _, user := range softDeletedUsers {
+		// Delete user's related data (hard delete)
+		DB.Unscoped().Where("user_id = ?", user.ID).Delete(&models.Ban{})
+		DB.Unscoped().Where("banned_by_id = ?", user.ID).Delete(&models.Ban{})
+		DB.Unscoped().Where("user_id = ?", user.ID).Delete(&models.Mute{})
+		DB.Unscoped().Where("muted_by_id = ?", user.ID).Delete(&models.Mute{})
+		DB.Unscoped().Where("user_id = ?", user.ID).Delete(&models.Mention{})
+		DB.Unscoped().Where("user_id = ?", user.ID).Delete(&models.AuditLog{})
+		DB.Unscoped().Where("user_id = ?", user.ID).Delete(&models.ChatMessage{})
+		DB.Unscoped().Where("recipient_id = ?", user.ID).Delete(&models.ChatMessage{})
+
+		// Delete the user (hard delete)
+		if err := DB.Unscoped().Delete(&user).Error; err != nil {
+			log.Printf("Warning: failed to hard delete user %s (ID: %d): %v", user.Username, user.ID, err)
+			continue
+		}
+
+		log.Printf("Cleaned up soft-deleted user: %s (ID: %d)", user.Username, user.ID)
+	}
+
+	log.Printf("Successfully cleaned up %d soft-deleted user(s)", len(softDeletedUsers))
 	return nil
 }
 

@@ -758,7 +758,7 @@ func handleDeleteUser(user *models.User, args []string) (string, error) {
 	}
 
 	username := args[0]
-	
+
 	// Prevent deleting yourself
 	if username == user.Username {
 		return "", fmt.Errorf("you cannot delete yourself")
@@ -778,15 +778,18 @@ func handleDeleteUser(user *models.User, args []string) (string, error) {
 		}
 	}
 
-	// Delete user's related data
-	database.DB.Where("user_id = ?", targetUser.ID).Delete(&models.Ban{})
-	database.DB.Where("user_id = ?", targetUser.ID).Delete(&models.Mute{})
-	database.DB.Where("user_id = ?", targetUser.ID).Delete(&models.Mention{})
-	database.DB.Where("user_id = ?", targetUser.ID).Delete(&models.AuditLog{})
-	database.DB.Where("user_id = ?", targetUser.ID).Delete(&models.ChatMessage{})
+	// Delete user's related data (hard delete)
+	database.DB.Unscoped().Where("user_id = ?", targetUser.ID).Delete(&models.Ban{})
+	database.DB.Unscoped().Where("banned_by_id = ?", targetUser.ID).Delete(&models.Ban{})
+	database.DB.Unscoped().Where("user_id = ?", targetUser.ID).Delete(&models.Mute{})
+	database.DB.Unscoped().Where("muted_by_id = ?", targetUser.ID).Delete(&models.Mute{})
+	database.DB.Unscoped().Where("user_id = ?", targetUser.ID).Delete(&models.Mention{})
+	database.DB.Unscoped().Where("user_id = ?", targetUser.ID).Delete(&models.AuditLog{})
+	database.DB.Unscoped().Where("user_id = ?", targetUser.ID).Delete(&models.ChatMessage{})
+	database.DB.Unscoped().Where("recipient_id = ?", targetUser.ID).Delete(&models.ChatMessage{})
 
-	// Delete the user
-	if err := database.DB.Delete(&targetUser).Error; err != nil {
+	// Delete the user (hard delete to allow re-registration with same username)
+	if err := database.DB.Unscoped().Delete(&targetUser).Error; err != nil {
 		return "", fmt.Errorf("failed to delete user: %w", err)
 	}
 
