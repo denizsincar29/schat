@@ -560,6 +560,12 @@ func handleCommand(client *Client, line string) {
 	cmdName := strings.ToLower(parts[0])
 	args := parts[1:]
 
+	// Special handling for /addkey command which requires multiline input
+	if cmdName == "addkey" {
+		handleAddKey(client)
+		return
+	}
+
 	cmd := commands.GetCommand(cmdName)
 	if cmd == nil {
 		fmt.Fprintf(client.Conn, "Unknown command: %s\n", cmdName)
@@ -585,6 +591,64 @@ func handleCommand(client *Client, line string) {
 			fmt.Fprintf(client.Conn, "%s\n", result)
 		}
 	}
+}
+
+func handleAddKey(client *Client) {
+	// Check if user already has an SSH key
+	if client.User.SSHKey != "" {
+		fmt.Fprintf(client.Conn, "You already have an SSH key configured. To replace it, contact an admin.\n")
+		return
+	}
+
+	// Check if user has a password (for security, users should have at least one auth method)
+	if client.User.PasswordHash == "" {
+		fmt.Fprintf(client.Conn, "Error: Cannot add SSH key without a password set. Please contact an admin.\n")
+		return
+	}
+
+	fmt.Fprintf(client.Conn, "\nPaste your SSH public key below.\n")
+	fmt.Fprintf(client.Conn, "End with a line containing only 'END'\n\n")
+
+	client.Terminal.SetPrompt("")
+	var keyLines []string
+	for {
+		line, err := client.Terminal.ReadLine()
+		if err != nil {
+			fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+			return
+		}
+		line = strings.TrimSpace(line)
+		if line == "END" {
+			break
+		}
+		if line != "" {
+			keyLines = append(keyLines, line)
+		}
+	}
+
+	sshKey := strings.Join(keyLines, "\n")
+	if sshKey == "" {
+		fmt.Fprintf(client.Conn, "SSH key cannot be empty\n")
+		return
+	}
+
+	// Validate SSH key format
+	_, _, _, _, err := ssh.ParseAuthorizedKey([]byte(sshKey))
+	if err != nil {
+		fmt.Fprintf(client.Conn, "Invalid SSH key format: %v\n", err)
+		return
+	}
+
+	// Update user with SSH key
+	client.User.SSHKey = sshKey
+	if err := database.DB.Save(client.User).Error; err != nil {
+		fmt.Fprintf(client.Conn, "Failed to save SSH key: %v\n", err)
+		return
+	}
+
+	logAction(client.User, "addkey", "Added SSH key to account")
+	fmt.Fprintf(client.Conn, "\nSSH key added successfully!\n")
+	fmt.Fprintf(client.Conn, "You can now login using either your password or SSH key.\n")
 }
 
 func handleMessage(client *Client, message string) {
