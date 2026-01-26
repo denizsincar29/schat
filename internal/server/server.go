@@ -627,7 +627,9 @@ func handleMessage(client *Client, message string) {
 	words := strings.Fields(message)
 	for _, word := range words {
 		if strings.HasPrefix(word, "@") && len(word) > 1 {
+			// Strip trailing punctuation
 			mentionedUsername := strings.TrimPrefix(word, "@")
+			mentionedUsername = strings.TrimRight(mentionedUsername, ".,!?;:")
 			
 			// Handle @admin - notify all admins
 			if mentionedUsername == "admin" {

@@ -29,6 +29,7 @@ services:
       DB_SSLMODE: disable
       SSH_PORT: 2222
       SSH_HOST_KEY: /data/ssh_host_key
+      REPORTS_DIR: /data/reports
     ports:
       - "${SSH_PORT}:2222"
     volumes:
