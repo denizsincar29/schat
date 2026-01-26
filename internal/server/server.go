@@ -24,7 +24,6 @@ import (
 	"gorm.io/gorm"
 )
 
-
 type Client struct {
 	User     *models.User
 	Conn     ssh.Channel
@@ -215,7 +214,7 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *s
 			handleRegistration(channel, sshConn.User())
 			return
 		}
-		
+
 		// Check if user_id is set (authenticated user)
 		if sshConn.Permissions.Extensions["user_id"] != "" {
 			var userID uint
@@ -343,7 +342,7 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 
 	// Start reading input using term.Terminal for proper echo handling
 	terminal := term.NewTerminal(channel, "> ")
-	
+
 	// Add client to server
 	client := &Client{
 		User:     user,
@@ -394,7 +393,7 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 	}
 
 	logAction(user, "connect", "User connected")
-	
+
 	// Setup tab completion
 	terminal.AutoCompleteCallback = func(line string, pos int, key rune) (newLine string, newPos int, ok bool) {
 		// Only handle tab key
@@ -405,14 +404,14 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 		// Get the part before cursor
 		prefix := line[:pos]
 		suffix := line[pos:]
-		
+
 		// Find the word we're completing (last word in prefix)
 		words := strings.Fields(prefix)
 		if len(words) == 0 && len(prefix) > 0 && prefix[len(prefix)-1] == ' ' {
 			// Cursor is after a space, nothing to complete
 			return "", 0, false
 		}
-		
+
 		var wordToComplete string
 		var beforeWord string
 		if len(words) > 0 {
@@ -494,7 +493,7 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 		newPos = len(beforeWord + completion)
 		return newLine, newPos, true
 	}
-	
+
 	for {
 		line, err := terminal.ReadLine()
 		if err != nil {

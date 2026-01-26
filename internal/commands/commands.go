@@ -758,7 +758,7 @@ func handleDeleteUser(user *models.User, args []string) (string, error) {
 	}
 
 	username := args[0]
-	
+
 	// Prevent deleting yourself
 	if username == user.Username {
 		return "", fmt.Errorf("you cannot delete yourself")
