@@ -153,6 +153,41 @@ func init() {
 	})
 
 	registerCommand(&Command{
+		Name:        "promote",
+		Aliases:     []string{"makeadmin"},
+		Description: "Promote a user to admin",
+		Usage:       "/promote <username>",
+		Handler:     handlePromote,
+		AdminOnly:   true,
+	})
+
+	registerCommand(&Command{
+		Name:        "demote",
+		Aliases:     []string{"removeadmin"},
+		Description: "Remove admin privileges from a user",
+		Usage:       "/demote <username>",
+		Handler:     handleDemote,
+		AdminOnly:   true,
+	})
+
+	registerCommand(&Command{
+		Name:        "admins",
+		Aliases:     []string{"listadmins"},
+		Description: "List all admins",
+		Usage:       "/admins",
+		Handler:     handleListAdmins,
+	})
+
+	registerCommand(&Command{
+		Name:        "deleteuser",
+		Aliases:     []string{"deluser", "removeuser"},
+		Description: "Delete a user (admin only)",
+		Usage:       "/deleteuser <username>",
+		Handler:     handleDeleteUser,
+		AdminOnly:   true,
+	})
+
+	registerCommand(&Command{
 		Name:        "me",
 		Aliases:     []string{"emote", "action"},
 		Description: "Send an emote action",
@@ -634,4 +669,127 @@ func logAction(user *models.User, action string, details string) {
 		Details: details,
 	}
 	database.DB.Create(&log)
+}
+
+func handlePromote(user *models.User, args []string) (string, error) {
+	if len(args) < 1 {
+		return "", fmt.Errorf("usage: /promote <username>")
+	}
+
+	username := args[0]
+	var targetUser models.User
+	if err := database.DB.Where("username = ?", username).First(&targetUser).Error; err != nil {
+		return "", fmt.Errorf("user not found: %s", username)
+	}
+
+	if targetUser.IsAdmin {
+		return "", fmt.Errorf("%s is already an admin", username)
+	}
+
+	targetUser.IsAdmin = true
+	if err := database.DB.Save(&targetUser).Error; err != nil {
+		return "", fmt.Errorf("failed to promote user: %w", err)
+	}
+
+	logAction(user, "promote", fmt.Sprintf("Promoted %s to admin", username))
+	return fmt.Sprintf("%s has been promoted to admin", username), nil
+}
+
+func handleDemote(user *models.User, args []string) (string, error) {
+	if len(args) < 1 {
+		return "", fmt.Errorf("usage: /demote <username>")
+	}
+
+	username := args[0]
+	var targetUser models.User
+	if err := database.DB.Where("username = ?", username).First(&targetUser).Error; err != nil {
+		return "", fmt.Errorf("user not found: %s", username)
+	}
+
+	if !targetUser.IsAdmin {
+		return "", fmt.Errorf("%s is not an admin", username)
+	}
+
+	// Prevent demoting yourself if you're the only admin
+	var adminCount int64
+	database.DB.Model(&models.User{}).Where("is_admin = ?", true).Count(&adminCount)
+	if adminCount == 1 {
+		return "", fmt.Errorf("cannot demote the only admin")
+	}
+
+	targetUser.IsAdmin = false
+	if err := database.DB.Save(&targetUser).Error; err != nil {
+		return "", fmt.Errorf("failed to demote user: %w", err)
+	}
+
+	logAction(user, "demote", fmt.Sprintf("Demoted %s from admin", username))
+	return fmt.Sprintf("%s has been demoted from admin", username), nil
+}
+
+func handleListAdmins(user *models.User, args []string) (string, error) {
+	var admins []models.User
+	if err := database.DB.Where("is_admin = ?", true).Find(&admins).Error; err != nil {
+		return "", fmt.Errorf("failed to fetch admins: %w", err)
+	}
+
+	if len(admins) == 0 {
+		return "No admins found", nil
+	}
+
+	var result strings.Builder
+	result.WriteString("Admins:\n")
+	for i, admin := range admins {
+		displayName := admin.Username
+		if admin.Nickname != "" {
+			displayName = fmt.Sprintf("%s (%s)", admin.Nickname, admin.Username)
+		}
+		result.WriteString(fmt.Sprintf("%d. %s", i+1, displayName))
+		if admin.ID == user.ID {
+			result.WriteString(" (you)")
+		}
+		result.WriteString("\n")
+	}
+	return result.String(), nil
+}
+
+func handleDeleteUser(user *models.User, args []string) (string, error) {
+	if len(args) < 1 {
+		return "", fmt.Errorf("usage: /deleteuser <username>")
+	}
+
+	username := args[0]
+	
+	// Prevent deleting yourself
+	if username == user.Username {
+		return "", fmt.Errorf("you cannot delete yourself")
+	}
+
+	var targetUser models.User
+	if err := database.DB.Where("username = ?", username).First(&targetUser).Error; err != nil {
+		return "", fmt.Errorf("user not found: %s", username)
+	}
+
+	// Prevent deleting the only admin
+	if targetUser.IsAdmin {
+		var adminCount int64
+		database.DB.Model(&models.User{}).Where("is_admin = ?", true).Count(&adminCount)
+		if adminCount == 1 {
+			return "", fmt.Errorf("cannot delete the only admin")
+		}
+	}
+
+	// Delete user's related data
+	database.DB.Where("user_id = ?", targetUser.ID).Delete(&models.Ban{})
+	database.DB.Where("user_id = ?", targetUser.ID).Delete(&models.Mute{})
+	database.DB.Where("user_id = ?", targetUser.ID).Delete(&models.Mention{})
+	database.DB.Where("user_id = ?", targetUser.ID).Delete(&models.AuditLog{})
+	database.DB.Where("user_id = ?", targetUser.ID).Delete(&models.ChatMessage{})
+
+	// Delete the user
+	if err := database.DB.Delete(&targetUser).Error; err != nil {
+		return "", fmt.Errorf("failed to delete user: %w", err)
+	}
+
+	logAction(user, "deleteuser", fmt.Sprintf("Deleted user %s", username))
+	return fmt.Sprintf("User %s has been deleted", username), nil
 }
