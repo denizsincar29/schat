@@ -23,6 +23,18 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	// ASCII control characters
+	asciiBackspace      = 8
+	asciiDelete         = 127
+	asciiCtrlC          = 3
+	asciiCarriageReturn = '\r'
+	asciiNewline        = '\n'
+	// Printable ASCII range (space to ~)
+	asciiPrintableStart = 32
+	asciiPrintableEnd   = 127
+)
+
 type Client struct {
 	User    *models.User
 	Conn    ssh.Channel
@@ -146,15 +158,25 @@ func handleConnection(netConn net.Conn, config *ssh.ServerConfig) {
 func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *ssh.ServerConn) {
 	defer channel.Close()
 
+	// Channel to signal when PTY/shell setup is complete
+	setupDone := make(chan bool, 1)
+
 	// Handle session requests
 	go func() {
+		shellReceived := false
 		for req := range requests {
 			switch req.Type {
 			case "pty-req":
 				// Accept PTY request - client will handle terminal modes
 				req.Reply(true, nil)
 			case "shell":
+				shellReceived = true
 				req.Reply(true, nil)
+				// Signal that setup is complete
+				select {
+				case setupDone <- true:
+				default:
+				}
 			case "window-change":
 				// Accept window size changes
 				req.Reply(true, nil)
@@ -162,10 +184,22 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *s
 				req.Reply(false, nil)
 			}
 		}
+		// Ensure we signal even if shell is never received
+		if !shellReceived {
+			select {
+			case setupDone <- true:
+			default:
+			}
+		}
 	}()
 
-	// Give a moment for PTY request to be processed
-	time.Sleep(100 * time.Millisecond)
+	// Wait for setup to complete or timeout
+	select {
+	case <-setupDone:
+		// Setup complete, proceed
+	case <-time.After(200 * time.Millisecond):
+		// Timeout, proceed anyway
+	}
 
 	// Check if user is authenticated
 	var user *models.User
@@ -289,19 +323,19 @@ func readLine(channel ssh.Channel, reader *bufio.Reader) (string, error) {
 		if n > 0 {
 			ch := buf[0]
 			switch ch {
-			case '\r', '\n':
+			case asciiCarriageReturn, asciiNewline:
 				// Echo newline
 				channel.Write([]byte("\r\n"))
 				// Skip the following \n if we got \r
-				if ch == '\r' {
+				if ch == asciiCarriageReturn {
 					// Peek ahead for \n
 					peek, _ := reader.Peek(1)
-					if len(peek) > 0 && peek[0] == '\n' {
+					if len(peek) > 0 && peek[0] == asciiNewline {
 						reader.ReadByte() // consume the \n
 					}
 				}
 				return line.String(), nil
-			case 127, 8: // Backspace or Delete
+			case asciiDelete, asciiBackspace:
 				if line.Len() > 0 {
 					// Remove last character
 					str := line.String()
@@ -310,11 +344,11 @@ func readLine(channel ssh.Channel, reader *bufio.Reader) (string, error) {
 					// Echo backspace sequence
 					channel.Write([]byte("\b \b"))
 				}
-			case 3: // Ctrl+C
+			case asciiCtrlC:
 				return "", fmt.Errorf("interrupted")
 			default:
 				// Echo the character back
-				if ch >= 32 && ch < 127 {
+				if ch >= asciiPrintableStart && ch < asciiPrintableEnd {
 					line.WriteByte(ch)
 					channel.Write(buf[:1])
 				}
