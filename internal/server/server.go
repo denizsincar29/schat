@@ -90,7 +90,21 @@ func Run() error {
 				},
 			}, nil
 		},
-		NoClientAuth: true, // Allow anonymous connections for registration
+		// Allow keyboard-interactive for registration prompts
+		KeyboardInteractiveCallback: func(conn ssh.ConnMetadata, client ssh.KeyboardInteractiveChallenge) (*ssh.Permissions, error) {
+			// Check if user exists
+			var user models.User
+			if err := database.DB.Where("username = ?", conn.User()).First(&user).Error; err != nil {
+				// User doesn't exist - allow connection for registration
+				return &ssh.Permissions{
+					Extensions: map[string]string{
+						"registration": "true",
+					},
+				}, nil
+			}
+			// User exists - they should use password or key auth
+			return nil, fmt.Errorf("please use password or SSH key authentication")
+		},
 	}
 
 	// Load or generate host key
@@ -203,18 +217,28 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *s
 
 	// Check if user is authenticated
 	var user *models.User
-	if sshConn.Permissions != nil && sshConn.Permissions.Extensions["user_id"] != "" {
-		var userID uint
-		fmt.Sscanf(sshConn.Permissions.Extensions["user_id"], "%d", &userID)
-		if err := database.DB.First(&user, userID).Error; err == nil {
-			// User is authenticated
-			handleAuthenticatedUser(channel, user)
+	if sshConn.Permissions != nil {
+		// Check if this is a registration session
+		if sshConn.Permissions.Extensions["registration"] == "true" {
+			// Anonymous user - handle registration
+			handleRegistration(channel, sshConn.User())
 			return
+		}
+		
+		// Check if user_id is set (authenticated user)
+		if sshConn.Permissions.Extensions["user_id"] != "" {
+			var userID uint
+			fmt.Sscanf(sshConn.Permissions.Extensions["user_id"], "%d", &userID)
+			if err := database.DB.First(&user, userID).Error; err == nil {
+				// User is authenticated
+				handleAuthenticatedUser(channel, user)
+				return
+			}
 		}
 	}
 
-	// Anonymous user - handle registration
-	handleRegistration(channel, sshConn.User())
+	// If we get here, something went wrong - close the connection
+	fmt.Fprintf(channel, "Authentication error. Please try again.\r\n")
 }
 
 func handleRegistration(channel ssh.Channel, username string) {
@@ -310,6 +334,7 @@ func handleRegistration(channel ssh.Channel, username string) {
 func readLine(channel ssh.Channel, reader *bufio.Reader) (string, error) {
 	var line strings.Builder
 	buf := make([]byte, 1)
+	lineStarted := false
 
 	for {
 		n, err := reader.Read(buf)
@@ -322,18 +347,17 @@ func readLine(channel ssh.Channel, reader *bufio.Reader) (string, error) {
 
 		if n > 0 {
 			ch := buf[0]
+			
+			// Skip leading line-ending characters from previous input
+			if !lineStarted && (ch == asciiCarriageReturn || ch == asciiNewline) {
+				continue
+			}
+			
 			switch ch {
 			case asciiCarriageReturn, asciiNewline:
 				// Echo newline
 				channel.Write([]byte("\r\n"))
-				// Skip the following \n if we got \r
-				if ch == asciiCarriageReturn {
-					// Peek ahead for \n
-					peek, _ := reader.Peek(1)
-					if len(peek) > 0 && peek[0] == asciiNewline {
-						reader.ReadByte() // consume the \n
-					}
-				}
+				// Return immediately - any trailing \n or \r will be skipped on next call
 				return line.String(), nil
 			case asciiDelete, asciiBackspace:
 				if line.Len() > 0 {
@@ -349,6 +373,7 @@ func readLine(channel ssh.Channel, reader *bufio.Reader) (string, error) {
 			default:
 				// Echo the character back
 				if ch >= asciiPrintableStart && ch < asciiPrintableEnd {
+					lineStarted = true
 					line.WriteByte(ch)
 					channel.Write(buf[:1])
 				}

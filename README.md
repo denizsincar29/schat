@@ -99,15 +99,25 @@ docker compose up -d
 
 ### Connecting
 
-Connect to the SSH server:
+**Registration (first-time users):**
 ```bash
-ssh -p 2222 username@localhost
+# Connect with keyboard-interactive auth for registration
+ssh -p 2222 -o PreferredAuthentications=keyboard-interactive newusername@localhost
 ```
 
-For first-time users, connect without a username to register:
+You'll be prompted to choose between password or SSH key authentication.
+
+**Login (existing users):**
 ```bash
-ssh -p 2222 localhost
+# Login with password
+ssh -p 2222 username@localhost
+# You'll be prompted for your password
+
+# Or use sshpass for non-interactive login
+sshpass -p 'yourpassword' ssh -p 2222 username@localhost
 ```
+
+**Note:** After registration, you must reconnect to login with your credentials.
 
 ## Manual Setup (without Docker)
 
