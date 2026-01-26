@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bufio"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -20,20 +19,10 @@ import (
 	"github.com/denizsincar29/schat/internal/database"
 	"github.com/denizsincar29/schat/internal/models"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/term"
 	"gorm.io/gorm"
 )
 
-const (
-	// ASCII control characters
-	asciiBackspace      = 8
-	asciiDelete         = 127
-	asciiCtrlC          = 3
-	asciiCarriageReturn = '\r'
-	asciiNewline        = '\n'
-	// Printable ASCII range (space to ~)
-	asciiPrintableStart = 32
-	asciiPrintableEnd   = 127
-)
 
 type Client struct {
 	User    *models.User
@@ -248,12 +237,12 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *s
 func handleRegistration(channel ssh.Channel, username string) {
 	fmt.Fprintf(channel, "Welcome to schat!\r\n\r\n")
 
-	reader := bufio.NewReader(channel)
+	terminal := term.NewTerminal(channel, "")
 
 	// Get username if not provided
 	if username == "" {
-		fmt.Fprintf(channel, "Please enter your desired username: ")
-		line, err := readLine(channel, reader)
+		terminal.SetPrompt("Please enter your desired username: ")
+		line, err := terminal.ReadLine()
 		if err != nil {
 			fmt.Fprintf(channel, "\r\nError reading input: %v\r\n", err)
 			return
@@ -270,9 +259,9 @@ func handleRegistration(channel ssh.Channel, username string) {
 	fmt.Fprintf(channel, "\r\nChoose authentication method:\r\n")
 	fmt.Fprintf(channel, "1. Password\r\n")
 	fmt.Fprintf(channel, "2. SSH Key\r\n")
-	fmt.Fprintf(channel, "Enter choice (1 or 2): ")
+	terminal.SetPrompt("Enter choice (1 or 2): ")
 
-	choice, err := readLine(channel, reader)
+	choice, err := terminal.ReadLine()
 	if err != nil {
 		fmt.Fprintf(channel, "\r\nError reading input: %v\r\n", err)
 		return
@@ -282,8 +271,8 @@ func handleRegistration(channel ssh.Channel, username string) {
 	var password, sshKey string
 
 	if choice == "1" {
-		fmt.Fprintf(channel, "\r\nEnter password (visible): ")
-		line, err := readLine(channel, reader)
+		terminal.SetPrompt("\r\nEnter password (visible): ")
+		line, err := terminal.ReadLine()
 		if err != nil {
 			fmt.Fprintf(channel, "\r\nError reading input: %v\r\n", err)
 			return
@@ -296,9 +285,10 @@ func handleRegistration(channel ssh.Channel, username string) {
 		}
 	} else if choice == "2" {
 		fmt.Fprintf(channel, "\r\nPaste your SSH public key (end with a line containing only 'END'):\r\n")
+		terminal.SetPrompt("")
 		var keyLines []string
 		for {
-			line, err := readLine(channel, reader)
+			line, err := terminal.ReadLine()
 			if err != nil {
 				fmt.Fprintf(channel, "\r\nError reading input: %v\r\n", err)
 				return
@@ -332,58 +322,6 @@ func handleRegistration(channel ssh.Channel, username string) {
 	fmt.Fprintf(channel, "\r\nRegistration successful! Please reconnect to login.\r\n")
 
 	logAction(newUser, "register", "User registered")
-}
-
-// readLine reads a line from the channel with proper echo support
-func readLine(channel ssh.Channel, reader *bufio.Reader) (string, error) {
-	var line strings.Builder
-	buf := make([]byte, 1)
-	lineStarted := false
-
-	for {
-		n, err := reader.Read(buf)
-		if err != nil {
-			if err == io.EOF && line.Len() > 0 {
-				return line.String(), nil
-			}
-			return "", err
-		}
-
-		if n > 0 {
-			ch := buf[0]
-			
-			// Skip leading line-ending characters from previous input
-			if !lineStarted && (ch == asciiCarriageReturn || ch == asciiNewline) {
-				continue
-			}
-			
-			switch ch {
-			case asciiCarriageReturn, asciiNewline:
-				// Echo newline
-				channel.Write([]byte("\r\n"))
-				// Return immediately - any trailing \n or \r will be skipped on next call
-				return line.String(), nil
-			case asciiDelete, asciiBackspace:
-				if line.Len() > 0 {
-					// Remove last character
-					str := line.String()
-					line.Reset()
-					line.WriteString(str[:len(str)-1])
-					// Echo backspace sequence
-					channel.Write([]byte("\b \b"))
-				}
-			case asciiCtrlC:
-				return "", fmt.Errorf("interrupted")
-			default:
-				// Echo the character back
-				if ch >= asciiPrintableStart && ch < asciiPrintableEnd {
-					lineStarted = true
-					line.WriteByte(ch)
-					channel.Write(buf[:1])
-				}
-			}
-		}
-	}
 }
 
 func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
@@ -441,11 +379,10 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 
 	logAction(user, "connect", "User connected")
 
-	// Start reading input
-	reader := bufio.NewReader(channel)
+	// Start reading input using term.Terminal for proper echo handling
+	terminal := term.NewTerminal(channel, "> ")
 	for {
-		fmt.Fprintf(channel, "> ")
-		line, err := reader.ReadString('\n')
+		line, err := terminal.ReadLine()
 		if err != nil {
 			if err != io.EOF {
 				log.Printf("Error reading from client: %v", err)
