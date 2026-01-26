@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -432,13 +433,12 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 			}
 		} else if strings.HasPrefix(wordToComplete, "@") {
 			// Username completion for mentions (starts with @)
-			userPrefix := strings.ToLower(wordToComplete[1:])
+			userPrefix := wordToComplete[1:]
 			var users []models.User
-			database.DB.Find(&users)
+			// Use database filtering for efficiency
+			database.DB.Where("username LIKE ?", userPrefix+"%").Limit(10).Find(&users)
 			for _, u := range users {
-				if strings.HasPrefix(strings.ToLower(u.Username), userPrefix) {
-					completions = append(completions, "@"+u.Username)
-				}
+				completions = append(completions, "@"+u.Username)
 			}
 		} else if len(words) > 0 && (words[0] == "/join" || words[0] == "/j") && len(words) <= 2 {
 			// Room name completion after /join command
@@ -468,13 +468,12 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 					"deluser": true, "removeuser": true,
 				}
 				if usernameCommands[cmdName] {
-					userPrefix := strings.ToLower(wordToComplete)
+					userPrefix := wordToComplete
 					var users []models.User
-					database.DB.Find(&users)
+					// Use database filtering for efficiency
+					database.DB.Where("username LIKE ?", userPrefix+"%").Limit(10).Find(&users)
 					for _, u := range users {
-						if strings.HasPrefix(strings.ToLower(u.Username), userPrefix) {
-							completions = append(completions, u.Username)
-						}
+						completions = append(completions, u.Username)
 					}
 				}
 			}
@@ -485,14 +484,7 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 		}
 
 		// Sort completions for consistent behavior
-		// Use a simple bubble sort since we're likely to have few completions
-		for i := 0; i < len(completions)-1; i++ {
-			for j := 0; j < len(completions)-i-1; j++ {
-				if completions[j] > completions[j+1] {
-					completions[j], completions[j+1] = completions[j+1], completions[j]
-				}
-			}
-		}
+		sort.Strings(completions)
 
 		// Return first match
 		completion := completions[0]

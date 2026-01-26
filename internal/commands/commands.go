@@ -710,7 +710,7 @@ func handleDemote(user *models.User, args []string) (string, error) {
 		return "", fmt.Errorf("%s is not an admin", username)
 	}
 
-	// Prevent demoting yourself if you're the only admin
+	// Prevent demoting the only admin (whether it's yourself or someone else)
 	var adminCount int64
 	database.DB.Model(&models.User{}).Where("is_admin = ?", true).Count(&adminCount)
 	if adminCount == 1 {
