@@ -146,15 +146,11 @@ func handleConnection(netConn net.Conn, config *ssh.ServerConfig) {
 func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *ssh.ServerConn) {
 	defer channel.Close()
 
-	// Track if PTY was requested
-	var ptyRequested bool
-
 	// Handle session requests
 	go func() {
 		for req := range requests {
 			switch req.Type {
 			case "pty-req":
-				ptyRequested = true
 				// Accept PTY request - client will handle terminal modes
 				req.Reply(true, nil)
 			case "shell":
