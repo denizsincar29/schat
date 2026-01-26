@@ -620,12 +620,10 @@ func handleMessage(client *Client, message string) {
 				}
 				database.DB.Create(&mention)
 
-				// Send bell notification if enabled
+				// Send bell notification on mention (always)
 				server.mutex.RLock()
 				if mentionedClient, ok := server.clients[mentionedUser.ID]; ok {
-					if mentionedUser.BellEnabled {
-						mentionedClient.Terminal.Write([]byte("\a"))
-					}
+					mentionedClient.Terminal.Write([]byte("\a"))
 				}
 				server.mutex.RUnlock()
 			}
@@ -650,6 +648,10 @@ func broadcastToRoom(roomID uint, message string, excludeUserID uint) {
 			client.Mutex.Lock()
 			// Use terminal.Write to properly display messages above the input line
 			client.Terminal.Write([]byte(message + "\r\n"))
+			// Send bell notification if enabled for all incoming messages
+			if client.User.BellEnabled {
+				client.Terminal.Write([]byte("\a"))
+			}
 			client.Mutex.Unlock()
 		}
 	}
