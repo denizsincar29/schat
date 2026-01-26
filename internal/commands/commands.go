@@ -254,10 +254,11 @@ func handleCreate(user *models.User, args []string) (string, error) {
 		description = strings.Join(args[1:], " ")
 	}
 
+	creatorID := user.ID
 	room := models.Room{
 		Name:        roomName,
 		Description: description,
-		CreatorID:   user.ID,
+		CreatorID:   &creatorID,
 	}
 
 	if err := database.DB.Create(&room).Error; err != nil {

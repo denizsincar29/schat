@@ -3,22 +3,19 @@ FROM golang:1.24-alpine AS builder
 
 WORKDIR /app
 
-# Copy go mod files
-COPY go.mod go.sum ./
-RUN go mod download
-
-# Copy source code
+# Copy everything including vendor directory
 COPY . .
 
-# Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -o schat .
+# Build the application using vendored dependencies
+RUN CGO_ENABLED=0 GOOS=linux go build -mod=vendor -o schat .
 
 # Final stage
 FROM alpine:latest
 
-RUN apk --no-cache add ca-certificates
-
 WORKDIR /root/
+
+# Copy ca-certificates from builder stage
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
 # Copy the binary from builder
 COPY --from=builder /app/schat .

@@ -28,9 +28,9 @@ type Room struct {
 	gorm.Model
 	Name        string `gorm:"unique;not null"`
 	Description string
-	IsPrivate   bool `gorm:"default:false"`
-	CreatorID   uint `gorm:"default:0"`
-	Creator     User `gorm:"foreignKey:CreatorID;constraint:OnDelete:SET NULL;"`
+	IsPrivate   bool  `gorm:"default:false"`
+	CreatorID   *uint
+	Creator     *User `gorm:"foreignKey:CreatorID;constraint:OnDelete:SET NULL;"`
 }
 
 type ChatMessage struct {
