@@ -107,8 +107,7 @@ Host $HOST_ENTRY
     User $USERNAME
     IdentityFile $KEY_PATH
     PreferredAuthentications publickey,keyboard-interactive
-    StrictHostKeyChecking no
-    UserKnownHostsFile /dev/null
+    StrictHostKeyChecking accept-new
 
 EOF
     success "Added SSH config entry: $HOST_ENTRY"

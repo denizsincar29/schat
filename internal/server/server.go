@@ -645,16 +645,7 @@ func handleAddKey(client *Client, args []string) {
 		line = strings.TrimSpace(line)
 		
 		// Check for private key markers - prevent users from pasting private keys
-		if strings.Contains(line, "BEGIN") && (strings.Contains(line, "PRIVATE KEY") || strings.Contains(line, "RSA PRIVATE KEY") || strings.Contains(line, "OPENSSH PRIVATE KEY")) {
-			fmt.Fprintf(client.Conn, "\n⚠️  WARNING: You appear to be pasting a PRIVATE key!\n")
-			fmt.Fprintf(client.Conn, "You should NEVER share your private key. Please paste your PUBLIC key instead.\n")
-			fmt.Fprintf(client.Conn, "Your public key file typically has a .pub extension (e.g., id_rsa.pub)\n\n")
-			client.Terminal.SetPrompt(originalPrompt)
-			return
-		}
-		
-		// Also check for END markers of private keys
-		if strings.Contains(line, "END") && (strings.Contains(line, "PRIVATE KEY") || strings.Contains(line, "RSA PRIVATE KEY") || strings.Contains(line, "OPENSSH PRIVATE KEY")) {
+		if isPrivateKeyMarker(line) {
 			fmt.Fprintf(client.Conn, "\n⚠️  WARNING: You appear to be pasting a PRIVATE key!\n")
 			fmt.Fprintf(client.Conn, "You should NEVER share your private key. Please paste your PUBLIC key instead.\n")
 			fmt.Fprintf(client.Conn, "Your public key file typically has a .pub extension (e.g., id_rsa.pub)\n\n")
@@ -710,6 +701,24 @@ func handleAddKey(client *Client, args []string) {
 	
 	// Restore prompt
 	client.Terminal.SetPrompt(originalPrompt)
+}
+
+// isPrivateKeyMarker checks if a line contains markers indicating a private key
+func isPrivateKeyMarker(line string) bool {
+	lineUpper := strings.ToUpper(line)
+	// Check for various private key format markers
+	privateKeyIndicators := []string{
+		"PRIVATE KEY",     // Catches RSA, DSA, EC, OPENSSH PRIVATE KEY, etc.
+		"BEGIN PRIVATE",   // Additional safety
+		"END PRIVATE",     // Additional safety
+	}
+	
+	for _, indicator := range privateKeyIndicators {
+		if strings.Contains(lineUpper, indicator) {
+			return true
+		}
+	}
+	return false
 }
 
 func handleMessage(client *Client, message string) {
