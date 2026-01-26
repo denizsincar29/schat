@@ -302,7 +302,8 @@ func handleRegistration(channel ssh.Channel, username string) {
 				keyLines = append(keyLines, line)
 			}
 		}
-		sshKey = strings.Join(keyLines, "\n")
+		// SSH public keys should be on a single line (join wrapped lines with spaces)
+		sshKey = strings.Join(keyLines, " ")
 
 		if sshKey == "" {
 			fmt.Fprintf(channel, "SSH key cannot be empty\r\n")
@@ -561,6 +562,8 @@ func handleCommand(client *Client, line string) {
 	args := parts[1:]
 
 	// Special handling for /addkey command which requires multiline input
+	// This bypasses the standard command system because the Command handler
+	// signature doesn't support interactive multiline input from the terminal
 	if cmdName == "addkey" {
 		handleAddKey(client)
 		return
@@ -609,12 +612,15 @@ func handleAddKey(client *Client) {
 	fmt.Fprintf(client.Conn, "\nPaste your SSH public key below.\n")
 	fmt.Fprintf(client.Conn, "End with a line containing only 'END'\n\n")
 
+	// Store original prompt to restore later
+	originalPrompt := "> "
 	client.Terminal.SetPrompt("")
 	var keyLines []string
 	for {
 		line, err := client.Terminal.ReadLine()
 		if err != nil {
 			fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+			client.Terminal.SetPrompt(originalPrompt)
 			return
 		}
 		line = strings.TrimSpace(line)
@@ -626,9 +632,11 @@ func handleAddKey(client *Client) {
 		}
 	}
 
-	sshKey := strings.Join(keyLines, "\n")
+	// SSH public keys should be on a single line (join wrapped lines with spaces)
+	sshKey := strings.Join(keyLines, " ")
 	if sshKey == "" {
 		fmt.Fprintf(client.Conn, "SSH key cannot be empty\n")
+		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
 
@@ -636,6 +644,7 @@ func handleAddKey(client *Client) {
 	_, _, _, _, err := ssh.ParseAuthorizedKey([]byte(sshKey))
 	if err != nil {
 		fmt.Fprintf(client.Conn, "Invalid SSH key format: %v\n", err)
+		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
 
@@ -643,12 +652,16 @@ func handleAddKey(client *Client) {
 	client.User.SSHKey = sshKey
 	if err := database.DB.Save(client.User).Error; err != nil {
 		fmt.Fprintf(client.Conn, "Failed to save SSH key: %v\n", err)
+		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
 
 	logAction(client.User, "addkey", "Added SSH key to account")
 	fmt.Fprintf(client.Conn, "\nSSH key added successfully!\n")
 	fmt.Fprintf(client.Conn, "You can now login using either your password or SSH key.\n")
+	
+	// Restore prompt
+	client.Terminal.SetPrompt(originalPrompt)
 }
 
 func handleMessage(client *Client, message string) {
