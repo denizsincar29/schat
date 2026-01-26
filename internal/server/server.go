@@ -603,19 +603,23 @@ func handleAddKey(client *Client, args []string) {
 		return
 	}
 
-	// Check if user has a password (for security, users should have at least one auth method)
+	// Check if user has a password - this ensures they have at least one auth method
+	// if SSH key validation fails, preventing lockout
 	if client.User.PasswordHash == "" {
 		fmt.Fprintf(client.Conn, "Error: Cannot add SSH key without a password set. Please contact an admin.\n")
 		return
 	}
 
-	// Check for preserve-password flag
+	// Parse flags - only accept recognized flags
 	preservePassword := false
 	for _, arg := range args {
 		argLower := strings.ToLower(arg)
 		if argLower == "preserve-password" || argLower == "pp" || argLower == "keep-password" {
 			preservePassword = true
-			break
+		} else {
+			fmt.Fprintf(client.Conn, "Unknown flag: %s\n", arg)
+			fmt.Fprintf(client.Conn, "Usage: /addkey [pp|preserve-password|keep-password]\n")
+			return
 		}
 	}
 
