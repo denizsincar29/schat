@@ -146,17 +146,30 @@ func handleConnection(netConn net.Conn, config *ssh.ServerConfig) {
 func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *ssh.ServerConn) {
 	defer channel.Close()
 
+	// Track if PTY was requested
+	var ptyRequested bool
+
 	// Handle session requests
 	go func() {
 		for req := range requests {
 			switch req.Type {
-			case "shell", "pty-req":
+			case "pty-req":
+				ptyRequested = true
+				// Accept PTY request - client will handle terminal modes
+				req.Reply(true, nil)
+			case "shell":
+				req.Reply(true, nil)
+			case "window-change":
+				// Accept window size changes
 				req.Reply(true, nil)
 			default:
 				req.Reply(false, nil)
 			}
 		}
 	}()
+
+	// Give a moment for PTY request to be processed
+	time.Sleep(100 * time.Millisecond)
 
 	// Check if user is authenticated
 	var user *models.User
@@ -175,27 +188,35 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *s
 }
 
 func handleRegistration(channel ssh.Channel, username string) {
-	fmt.Fprintf(channel, "Welcome to schat!\n\n")
+	fmt.Fprintf(channel, "Welcome to schat!\r\n\r\n")
 
+	reader := bufio.NewReader(channel)
+
+	// Get username if not provided
 	if username == "" {
 		fmt.Fprintf(channel, "Please enter your desired username: ")
-		reader := bufio.NewReader(channel)
-		line, err := reader.ReadString('\n')
+		line, err := readLine(channel, reader)
 		if err != nil {
+			fmt.Fprintf(channel, "\r\nError reading input: %v\r\n", err)
 			return
 		}
 		username = strings.TrimSpace(line)
 	}
 
-	fmt.Fprintf(channel, "Username: %s\n", username)
-	fmt.Fprintf(channel, "\nChoose authentication method:\n")
-	fmt.Fprintf(channel, "1. Password\n")
-	fmt.Fprintf(channel, "2. SSH Key\n")
+	if username == "" {
+		fmt.Fprintf(channel, "Username cannot be empty\r\n")
+		return
+	}
+
+	fmt.Fprintf(channel, "Username: %s\r\n", username)
+	fmt.Fprintf(channel, "\r\nChoose authentication method:\r\n")
+	fmt.Fprintf(channel, "1. Password\r\n")
+	fmt.Fprintf(channel, "2. SSH Key\r\n")
 	fmt.Fprintf(channel, "Enter choice (1 or 2): ")
 
-	reader := bufio.NewReader(channel)
-	choice, err := reader.ReadString('\n')
+	choice, err := readLine(channel, reader)
 	if err != nil {
+		fmt.Fprintf(channel, "\r\nError reading input: %v\r\n", err)
 		return
 	}
 	choice = strings.TrimSpace(choice)
@@ -203,44 +224,107 @@ func handleRegistration(channel ssh.Channel, username string) {
 	var password, sshKey string
 
 	if choice == "1" {
-		// Note: SSH protocol doesn't support terminal echo disabling during registration
-		// Users should change their password after registration if security is a concern
-		fmt.Fprintf(channel, "Enter password (warning: visible input): ")
-		line, err := reader.ReadString('\n')
+		fmt.Fprintf(channel, "\r\nEnter password (visible): ")
+		line, err := readLine(channel, reader)
 		if err != nil {
+			fmt.Fprintf(channel, "\r\nError reading input: %v\r\n", err)
 			return
 		}
 		password = strings.TrimSpace(line)
+
+		if password == "" {
+			fmt.Fprintf(channel, "Password cannot be empty\r\n")
+			return
+		}
 	} else if choice == "2" {
-		fmt.Fprintf(channel, "Paste your SSH public key (end with a line containing only 'END'):\n")
+		fmt.Fprintf(channel, "\r\nPaste your SSH public key (end with a line containing only 'END'):\r\n")
 		var keyLines []string
 		for {
-			line, err := reader.ReadString('\n')
+			line, err := readLine(channel, reader)
 			if err != nil {
+				fmt.Fprintf(channel, "\r\nError reading input: %v\r\n", err)
 				return
 			}
 			line = strings.TrimSpace(line)
 			if line == "END" {
 				break
 			}
-			keyLines = append(keyLines, line)
+			if line != "" {
+				keyLines = append(keyLines, line)
+			}
 		}
 		sshKey = strings.Join(keyLines, "\n")
+
+		if sshKey == "" {
+			fmt.Fprintf(channel, "SSH key cannot be empty\r\n")
+			return
+		}
 	} else {
-		fmt.Fprintf(channel, "Invalid choice\n")
+		fmt.Fprintf(channel, "Invalid choice. Please enter 1 or 2.\r\n")
 		return
 	}
 
 	// Create user
 	newUser, err := auth.CreateUser(username, password, sshKey, false)
 	if err != nil {
-		fmt.Fprintf(channel, "Registration failed: %v\n", err)
+		fmt.Fprintf(channel, "\r\nRegistration failed: %v\r\n", err)
 		return
 	}
 
-	fmt.Fprintf(channel, "\nRegistration successful! Please reconnect to login.\n")
+	fmt.Fprintf(channel, "\r\nRegistration successful! Please reconnect to login.\r\n")
 
 	logAction(newUser, "register", "User registered")
+}
+
+// readLine reads a line from the channel with proper echo support
+func readLine(channel ssh.Channel, reader *bufio.Reader) (string, error) {
+	var line strings.Builder
+	buf := make([]byte, 1)
+
+	for {
+		n, err := reader.Read(buf)
+		if err != nil {
+			if err == io.EOF && line.Len() > 0 {
+				return line.String(), nil
+			}
+			return "", err
+		}
+
+		if n > 0 {
+			ch := buf[0]
+			switch ch {
+			case '\r', '\n':
+				// Echo newline
+				channel.Write([]byte("\r\n"))
+				// Skip the following \n if we got \r
+				if ch == '\r' {
+					// Peek ahead for \n
+					peek, _ := reader.Peek(1)
+					if len(peek) > 0 && peek[0] == '\n' {
+						reader.ReadByte() // consume the \n
+					}
+				}
+				return line.String(), nil
+			case 127, 8: // Backspace or Delete
+				if line.Len() > 0 {
+					// Remove last character
+					str := line.String()
+					line.Reset()
+					line.WriteString(str[:len(str)-1])
+					// Echo backspace sequence
+					channel.Write([]byte("\b \b"))
+				}
+			case 3: // Ctrl+C
+				return "", fmt.Errorf("interrupted")
+			default:
+				// Echo the character back
+				if ch >= 32 && ch < 127 {
+					line.WriteByte(ch)
+					channel.Write(buf[:1])
+				}
+			}
+		}
+	}
 }
 
 func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
