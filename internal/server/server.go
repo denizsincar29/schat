@@ -624,7 +624,7 @@ func handleMessage(client *Client, message string) {
 				server.mutex.RLock()
 				if mentionedClient, ok := server.clients[mentionedUser.ID]; ok {
 					if mentionedUser.BellEnabled {
-						mentionedClient.Conn.Write([]byte("\a"))
+						mentionedClient.Terminal.Write([]byte("\a"))
 					}
 				}
 				server.mutex.RUnlock()
