@@ -264,6 +264,33 @@ func init() {
 		Handler:     handleMarkReports,
 		AdminOnly:   true,
 	})
+
+	registerCommand(&Command{
+		Name:        "move",
+		Aliases:     []string{"moveuser"},
+		Description: "Move a user to a different room (admin only)",
+		Usage:       "/move <username> <room_name>",
+		Handler:     handleMove,
+		AdminOnly:   true,
+	})
+
+	registerCommand(&Command{
+		Name:        "listusers",
+		Aliases:     []string{"allusers", "users"},
+		Description: "List all user accounts (admin only)",
+		Usage:       "/listusers",
+		Handler:     handleListUsers,
+		AdminOnly:   true,
+	})
+
+	registerCommand(&Command{
+		Name:        "viewuser",
+		Aliases:     []string{"userinfo"},
+		Description: "View detailed user information (admin only)",
+		Usage:       "/viewuser <username>",
+		Handler:     handleViewUser,
+		AdminOnly:   true,
+	})
 }
 
 func registerCommand(cmd *Command) {
@@ -485,6 +512,26 @@ func handleCreate(user *models.User, args []string) (string, error) {
 	}
 
 	roomName := args[0]
+	
+	// Validate room name - check for reserved names
+	reservedRoomNames := []string{"general", "admin", "system", "all", "everyone", "here"}
+	roomNameLower := strings.ToLower(roomName)
+	for _, reserved := range reservedRoomNames {
+		if roomNameLower == reserved {
+			return "", fmt.Errorf("room name '%s' is reserved and cannot be used", roomName)
+		}
+	}
+
+	// Check for minimum length
+	if len(roomName) < 2 {
+		return "", fmt.Errorf("room name must be at least 2 characters long")
+	}
+
+	// Check for maximum length
+	if len(roomName) > 32 {
+		return "", fmt.Errorf("room name must be at most 32 characters long")
+	}
+
 	description := ""
 	if len(args) > 1 {
 		description = strings.Join(args[1:], " ")
@@ -1282,4 +1329,138 @@ func handleMarkReports(user *models.User, args []string) (string, error) {
 	}
 
 	return fmt.Sprintf("Marked %d report(s) as read", result.RowsAffected), nil
+}
+
+func handleMove(user *models.User, args []string) (string, error) {
+	if len(args) < 2 {
+		return "", fmt.Errorf("usage: /move <username> <room_name>")
+	}
+
+	username := strings.TrimPrefix(args[0], "@")
+	roomName := args[1]
+
+	// Find the target user
+	var targetUser models.User
+	if err := database.DB.Where("username = ?", username).First(&targetUser).Error; err != nil {
+		return "", fmt.Errorf("user not found: %s", username)
+	}
+
+	// Find the target room
+	var room models.Room
+	if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
+		return "", fmt.Errorf("room not found: %s", roomName)
+	}
+
+	// Move the user (even if room is hidden, as per requirement)
+	targetUser.CurrentRoomID = &room.ID
+	if err := database.DB.Save(&targetUser).Error; err != nil {
+		return "", fmt.Errorf("failed to move user: %w", err)
+	}
+
+	return fmt.Sprintf("Moved %s to room %s", username, roomName), nil
+}
+
+func handleListUsers(user *models.User, args []string) (string, error) {
+	var users []models.User
+	if err := database.DB.Order("username").Find(&users).Error; err != nil {
+		return "", fmt.Errorf("failed to fetch users: %w", err)
+	}
+
+	if len(users) == 0 {
+		return "No users found", nil
+	}
+
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("Total users: %d\n\n", len(users)))
+	result.WriteString("Username          | Admin | Banned | Muted | Last Seen\n")
+	result.WriteString("------------------+-------+--------+-------+-----------\n")
+
+	for _, u := range users {
+		admin := " "
+		if u.IsAdmin {
+			admin = "Y"
+		}
+		banned := " "
+		if u.IsBanned {
+			banned = "Y"
+		}
+		muted := " "
+		if u.IsMuted {
+			muted = "Y"
+		}
+		lastSeen := "Never"
+		if !u.LastSeenAt.IsZero() {
+			lastSeen = u.LastSeenAt.Format("2006-01-02 15:04")
+		}
+		result.WriteString(fmt.Sprintf("%-17s | %-5s | %-6s | %-5s | %s\n",
+			u.Username, admin, banned, muted, lastSeen))
+	}
+
+	return result.String(), nil
+}
+
+func handleViewUser(user *models.User, args []string) (string, error) {
+	if len(args) < 1 {
+		return "", fmt.Errorf("usage: /viewuser <username>")
+	}
+
+	username := strings.TrimPrefix(args[0], "@")
+
+	var targetUser models.User
+	if err := database.DB.Preload("CurrentRoom").Where("username = ?", username).First(&targetUser).Error; err != nil {
+		return "", fmt.Errorf("user not found: %s", username)
+	}
+
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("=== User Information: %s ===\n\n", targetUser.Username))
+	result.WriteString(fmt.Sprintf("ID: %d\n", targetUser.ID))
+	result.WriteString(fmt.Sprintf("Username: %s\n", targetUser.Username))
+	
+	if targetUser.Nickname != "" {
+		result.WriteString(fmt.Sprintf("Nickname: %s\n", targetUser.Nickname))
+	}
+	
+	if targetUser.Status != "" {
+		result.WriteString(fmt.Sprintf("Status: %s\n", targetUser.Status))
+	}
+
+	result.WriteString(fmt.Sprintf("Is Admin: %v\n", targetUser.IsAdmin))
+	result.WriteString(fmt.Sprintf("Is Banned: %v\n", targetUser.IsBanned))
+	if targetUser.IsBanned && targetUser.BanExpiresAt != nil {
+		result.WriteString(fmt.Sprintf("Ban Expires: %s\n", targetUser.BanExpiresAt.Format("2006-01-02 15:04:05")))
+	}
+	
+	result.WriteString(fmt.Sprintf("Is Muted: %v\n", targetUser.IsMuted))
+	if targetUser.IsMuted && targetUser.MuteExpiresAt != nil {
+		result.WriteString(fmt.Sprintf("Mute Expires: %s\n", targetUser.MuteExpiresAt.Format("2006-01-02 15:04:05")))
+	}
+
+	result.WriteString(fmt.Sprintf("Bell Enabled: %v\n", targetUser.BellEnabled))
+	
+	if targetUser.CurrentRoom != nil {
+		result.WriteString(fmt.Sprintf("Current Room: %s\n", targetUser.CurrentRoom.Name))
+	} else {
+		result.WriteString("Current Room: None\n")
+	}
+
+	if !targetUser.LastSeenAt.IsZero() {
+		result.WriteString(fmt.Sprintf("Last Seen: %s\n", targetUser.LastSeenAt.Format("2006-01-02 15:04:05")))
+	}
+
+	result.WriteString(fmt.Sprintf("Created: %s\n", targetUser.CreatedAt.Format("2006-01-02 15:04:05")))
+	result.WriteString(fmt.Sprintf("Updated: %s\n", targetUser.UpdatedAt.Format("2006-01-02 15:04:05")))
+
+	hasPassword := "No"
+	if targetUser.PasswordHash != "" {
+		hasPassword = "Yes"
+	}
+	result.WriteString(fmt.Sprintf("Has Password: %s\n", hasPassword))
+
+	hasSSHKey := "No"
+	if targetUser.SSHKey != "" {
+		hasSSHKey = "Yes"
+	}
+	result.WriteString(fmt.Sprintf("Has SSH Key: %s\n", hasSSHKey))
+
+	return result.String(), nil
 }

@@ -339,6 +339,8 @@ func handleRegistration(channel ssh.Channel, username string) {
 		fmt.Fprintf(channel, "\r\nRegistration successful! You are the first user and have been granted admin privileges.\r\n")
 	} else {
 		fmt.Fprintf(channel, "\r\nRegistration successful!\r\n")
+		// Notify all admins about new user registration
+		sendNotificationToAdmins("user_registered", fmt.Sprintf("New user registered: %s", username), &newUser.ID, nil)
 	}
 
 	logAction(newUser, "register", "User registered")
@@ -405,6 +407,16 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 	}
 	fmt.Fprintf(channel, "Type /help for available commands.\n")
 	fmt.Fprintf(channel, "\n")
+
+	// Create client for offline notifications
+	client := &Client{
+		User:     user,
+		Conn:     channel,
+		Terminal: terminal,
+	}
+
+	// Deliver offline notifications
+	deliverOfflineNotifications(client)
 
 	// Show chat history (last 10 events)
 	showChatHistory(channel, user)
@@ -608,10 +620,84 @@ func handleCommand(client *Client, line string) {
 		return
 	}
 
+	// Store previous room for movement tracking
+	var previousRoomID *uint
+	var previousRoom *models.Room
+	if cmdName == "join" || cmdName == "j" || cmdName == "room" {
+		previousRoomID = client.User.CurrentRoomID
+		if previousRoomID != nil {
+			database.DB.First(&previousRoom, *previousRoomID)
+		}
+	}
+
 	result, err := cmd.Handler(client.User, args)
 	if err != nil {
 		fmt.Fprintf(client.Conn, "Error: %v\n", err)
 		return
+	}
+
+	// Handle post-command notifications
+	if err == nil && result != "" {
+		// Reload user to get updated data (e.g., new CurrentRoomID after join)
+		database.DB.First(client.User, client.User.ID)
+
+		switch cmdName {
+		case "create":
+			// Room was created, notify admins
+			if len(args) > 0 {
+				roomName := args[0]
+				var room models.Room
+				if err := database.DB.Where("name = ?", roomName).First(&room).Error; err == nil {
+					sendNotificationToAdmins("room_created", 
+						fmt.Sprintf("Room created: %s by %s", roomName, client.User.Username),
+						&client.User.ID, &room.ID)
+				}
+			}
+		case "join", "j", "room":
+			// User joined a room
+			if client.User.CurrentRoomID != nil && len(args) > 0 {
+				var newRoom models.Room
+				if err := database.DB.First(&newRoom, *client.User.CurrentRoomID).Error; err == nil {
+					// Notify admins if room join notifications are enabled
+					// Check setting for admin room join notifications
+					var setting models.Settings
+					showJoinNotifs := false
+					if err := database.DB.Where("key = ?", "admin_room_join_notifications").First(&setting).Error; err == nil {
+						showJoinNotifs = setting.Value == "true"
+					}
+					if showJoinNotifs {
+						var fromMsg string
+						if previousRoom != nil {
+							fromMsg = fmt.Sprintf(" from %s", previousRoom.Name)
+						}
+						sendNotificationToAdmins("user_joined_room",
+							fmt.Sprintf("%s joined room %s%s", client.User.Username, newRoom.Name, fromMsg),
+							&client.User.ID, &newRoom.ID)
+					}
+
+					// Notify room creator about user movement
+					if newRoom.CreatorID != nil && *newRoom.CreatorID != client.User.ID {
+						var fromMsg string
+						if previousRoom != nil {
+							fromMsg = fmt.Sprintf(" from %s", previousRoom.Name)
+						}
+						sendNotificationToUser(*newRoom.CreatorID, "user_joined_room",
+							fmt.Sprintf("%s joined your room %s%s", client.User.Username, newRoom.Name, fromMsg),
+							&client.User.ID, &newRoom.ID)
+					}
+
+					// Notify previous room creator about user leaving
+					if previousRoom != nil && previousRoom.CreatorID != nil && 
+						*previousRoom.CreatorID != client.User.ID &&
+						(client.User.CurrentRoomID == nil || *previousRoom.ID != *client.User.CurrentRoomID) {
+						sendNotificationToUser(*previousRoom.CreatorID, "user_left_room",
+							fmt.Sprintf("%s left your room %s and went to %s", 
+								client.User.Username, previousRoom.Name, newRoom.Name),
+							&client.User.ID, &previousRoom.ID)
+					}
+				}
+			}
+		}
 	}
 
 	if result != "" {
@@ -970,6 +1056,97 @@ func broadcastToRoom(roomID uint, message string, excludeUserID uint) {
 			client.Mutex.Unlock()
 		}
 	}
+}
+
+// createNotification creates a notification in the database
+func createNotification(userID uint, notifType string, message string, relatedUser *uint, relatedRoom *uint) {
+	notification := models.Notification{
+		UserID:      userID,
+		Type:        notifType,
+		Message:     message,
+		RelatedUser: relatedUser,
+		RelatedRoom: relatedRoom,
+	}
+	if err := database.DB.Create(&notification).Error; err != nil {
+		log.Printf("Error creating notification: %v", err)
+	}
+}
+
+// sendNotificationToAdmins sends a notification to all admins (online and offline)
+func sendNotificationToAdmins(notifType string, message string, relatedUser *uint, relatedRoom *uint) {
+	// Get all admin users
+	var admins []models.User
+	if err := database.DB.Where("is_admin = ?", true).Find(&admins).Error; err != nil {
+		log.Printf("Error fetching admins for notification: %v", err)
+		return
+	}
+
+	for _, admin := range admins {
+		// Create notification in database
+		createNotification(admin.ID, notifType, message, relatedUser, relatedRoom)
+
+		// If admin is online, send immediately
+		server.mutex.RLock()
+		if client, ok := server.clients[admin.ID]; ok {
+			client.Mutex.Lock()
+			client.Terminal.Write([]byte(fmt.Sprintf("\r\n[ADMIN] %s\r\n", message)))
+			if client.User.BellEnabled {
+				client.Terminal.Write([]byte("\a"))
+			}
+			client.Mutex.Unlock()
+		}
+		server.mutex.RUnlock()
+	}
+}
+
+// sendNotificationToUser sends a notification to a specific user (online or offline)
+func sendNotificationToUser(userID uint, notifType string, message string, relatedUser *uint, relatedRoom *uint) {
+	// Create notification in database
+	createNotification(userID, notifType, message, relatedUser, relatedRoom)
+
+	// If user is online, send immediately
+	server.mutex.RLock()
+	if client, ok := server.clients[userID]; ok {
+		client.Mutex.Lock()
+		client.Terminal.Write([]byte(fmt.Sprintf("\r\n[Notification] %s\r\n", message)))
+		if client.User.BellEnabled {
+			client.Terminal.Write([]byte("\a"))
+		}
+		client.Mutex.Unlock()
+	}
+	server.mutex.RUnlock()
+}
+
+// deliverOfflineNotifications sends unread notifications to a user when they log in
+func deliverOfflineNotifications(client *Client) {
+	var notifications []models.Notification
+	if err := database.DB.Where("user_id = ? AND is_read = ?", client.User.ID, false).
+		Order("created_at desc").
+		Limit(20). // Limit to last 20 unread notifications
+		Find(&notifications).Error; err != nil {
+		log.Printf("Error fetching offline notifications: %v", err)
+		return
+	}
+
+	if len(notifications) == 0 {
+		return
+	}
+
+	client.Mutex.Lock()
+	defer client.Mutex.Unlock()
+
+	client.Terminal.Write([]byte("\r\n=== Notifications ===\r\n"))
+	// Reverse order to show oldest first
+	for i := len(notifications) - 1; i >= 0; i-- {
+		notif := notifications[i]
+		client.Terminal.Write([]byte(fmt.Sprintf("  %s\r\n", notif.Message)))
+	}
+	client.Terminal.Write([]byte(fmt.Sprintf("=== %d unread notification(s) ===\r\n\r\n", len(notifications))))
+
+	// Mark as read
+	database.DB.Model(&models.Notification{}).
+		Where("user_id = ? AND is_read = ?", client.User.ID, false).
+		Update("is_read", true)
 }
 
 // cleanupEmptyRooms removes non-permanent rooms that have no users
