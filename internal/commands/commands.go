@@ -17,6 +17,11 @@ const (
 	maxDuration = 24 * time.Hour
 )
 
+var (
+	// Reserved names that cannot be used for rooms
+	reservedRoomNames = []string{"general", "admin", "system", "all", "everyone", "here"}
+)
+
 type Command struct {
 	Name        string
 	Aliases     []string
@@ -546,7 +551,6 @@ func handleCreate(user *models.User, args []string) (string, error) {
 	roomName := stripPrefixes(args[0])
 	
 	// Validate room name - check for reserved names
-	reservedRoomNames := []string{"general", "admin", "system", "all", "everyone", "here"}
 	roomNameLower := strings.ToLower(roomName)
 	for _, reserved := range reservedRoomNames {
 		if roomNameLower == reserved {

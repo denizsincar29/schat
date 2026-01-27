@@ -22,6 +22,11 @@ const (
 	threads  = 4
 )
 
+var (
+	// Reserved usernames that cannot be used for new accounts
+	reservedUsernames = []string{"me", "admin", "help", "system", "root", "all", "everyone", "here"}
+)
+
 // HashPassword creates a secure hash of the password
 func HashPassword(password string) (string, error) {
 	salt := make([]byte, saltSize)
@@ -95,7 +100,6 @@ func AuthenticateUser(username string, password string, publicKey ssh.PublicKey)
 // CreateUser creates a new user
 func CreateUser(username string, password string, sshKey string, isAdmin bool) (*models.User, error) {
 	// Validate username - check for reserved names
-	reservedUsernames := []string{"me", "admin", "help", "system", "root", "all", "everyone", "here"}
 	usernameLower := strings.ToLower(username)
 	for _, reserved := range reservedUsernames {
 		if usernameLower == reserved {

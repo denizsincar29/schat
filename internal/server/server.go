@@ -665,7 +665,7 @@ func handleCommand(client *Client, line string) {
 	}
 
 	// Handle post-command notifications
-	if err == nil && result != "" {
+	if result != "" {
 		// Reload user to get updated data (e.g., new CurrentRoomID after join)
 		database.DB.First(client.User, client.User.ID)
 
@@ -1171,9 +1171,13 @@ func deliverOfflineNotifications(client *Client) {
 	}
 	client.Terminal.Write([]byte(fmt.Sprintf("=== %d unread notification(s) ===\r\n\r\n", len(notifications))))
 
-	// Mark as read
+	// Mark delivered notifications as read using their specific IDs
+	notificationIDs := make([]uint, len(notifications))
+	for i, notif := range notifications {
+		notificationIDs[i] = notif.ID
+	}
 	database.DB.Model(&models.Notification{}).
-		Where("user_id = ? AND is_read = ?", client.User.ID, false).
+		Where("id IN ?", notificationIDs).
 		Update("is_read", true)
 }
 
