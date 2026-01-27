@@ -289,6 +289,14 @@ func GetAllCommands() []*Command {
 	return cmds
 }
 
+// capitalizeFirst capitalizes the first letter of a string
+func capitalizeFirst(s string) string {
+	if len(s) == 0 {
+		return s
+	}
+	return strings.ToUpper(string(s[0])) + s[1:]
+}
+
 func handleHelp(user *models.User, args []string) (string, error) {
 	// Special commands not in the regular command system
 	specialCommands := map[string]string{
@@ -332,11 +340,7 @@ func handleHelp(user *models.User, args []string) (string, error) {
 		for _, topic := range topics {
 			if topic.Name == topicOrCmd {
 				var result strings.Builder
-				topicTitle := topic.Name
-				if len(topic.Name) > 0 {
-					topicTitle = strings.ToUpper(string(topic.Name[0])) + topic.Name[1:]
-				}
-				result.WriteString(fmt.Sprintf("=== %s Commands ===\n", topicTitle))
+				result.WriteString(fmt.Sprintf("=== %s Commands ===\n", capitalizeFirst(topic.Name)))
 				
 				for _, cmdName := range topic.Commands {
 					cmd := GetCommand(cmdName)
@@ -392,11 +396,7 @@ func handleHelp(user *models.User, args []string) (string, error) {
 			continue
 		}
 		
-		topicTitle := topic.Name
-		if len(topic.Name) > 0 {
-			topicTitle = strings.ToUpper(string(topic.Name[0])) + topic.Name[1:]
-		}
-		result.WriteString(fmt.Sprintf("=== %s ===\n", topicTitle))
+		result.WriteString(fmt.Sprintf("=== %s ===\n", capitalizeFirst(topic.Name)))
 		for _, cmdName := range topic.Commands {
 			cmd := GetCommand(cmdName)
 			if cmd != nil {
