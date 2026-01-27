@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # schat-connect.sh - Easy SSH key setup and connection script for schat
-# Usage: ./schat-connect.sh username@hostname [port]
+# Usage: ./schat-connect.sh [username@hostname] [port]
+#        ./schat-connect.sh (interactive mode)
 
 set -e
 
@@ -16,27 +17,50 @@ error() { echo -e "${RED}Error: $1${NC}" >&2; }
 success() { echo -e "${GREEN}✓ $1${NC}"; }
 info() { echo -e "${YELLOW}→ $1${NC}"; }
 
-# Check arguments
-if [ $# -lt 1 ]; then
-    echo "Usage: $0 username@hostname [port]"
+# Default values
+DEFAULT_HOSTNAME="denizsincar.ru"
+DEFAULT_PORT="2222"
+
+# Check if running in interactive mode
+if [ $# -eq 0 ]; then
+    # Interactive mode
+    info "Interactive setup mode"
     echo ""
-    echo "Example: $0 myuser@chat.example.com"
-    echo "         $0 myuser@localhost 2222"
-    exit 1
+    
+    # Ask for hostname
+    read -p "Enter hostname [$DEFAULT_HOSTNAME]: " HOSTNAME
+    HOSTNAME="${HOSTNAME:-$DEFAULT_HOSTNAME}"
+    
+    # Ask for port
+    read -p "Enter port [$DEFAULT_PORT]: " PORT
+    PORT="${PORT:-$DEFAULT_PORT}"
+    
+    # Ask for username
+    read -p "Enter username: " USERNAME
+    if [ -z "$USERNAME" ]; then
+        error "Username cannot be empty"
+        exit 1
+    fi
+    
+    # Ask for custom name
+    read -p "Enter custom name for SSH config [schat-${HOSTNAME}]: " CUSTOM_NAME
+    CUSTOM_NAME="${CUSTOM_NAME:-schat-${HOSTNAME}}"
+else
+    # Command-line argument mode
+    USER_HOST="$1"
+    PORT="${2:-$DEFAULT_PORT}"
+    
+    # Extract username and hostname
+    if [[ ! "$USER_HOST" =~ ^([^@]+)@(.+)$ ]]; then
+        error "Invalid format. Use: username@hostname"
+        echo "Or run without arguments for interactive mode"
+        exit 1
+    fi
+    
+    USERNAME="${BASH_REMATCH[1]}"
+    HOSTNAME="${BASH_REMATCH[2]}"
+    CUSTOM_NAME="schat-${HOSTNAME}"
 fi
-
-# Parse arguments
-USER_HOST="$1"
-PORT="${2:-2222}"  # Default port is 2222
-
-# Extract username and hostname
-if [[ ! "$USER_HOST" =~ ^([^@]+)@(.+)$ ]]; then
-    error "Invalid format. Use: username@hostname"
-    exit 1
-fi
-
-USERNAME="${BASH_REMATCH[1]}"
-HOSTNAME="${BASH_REMATCH[2]}"
 
 info "Setting up SSH key for schat connection"
 echo "  Username: $USERNAME"
@@ -89,7 +113,7 @@ success "Public key ready"
 
 # Add/update SSH config
 SSH_CONFIG="$SSH_DIR/config"
-HOST_ENTRY="schat-${HOSTNAME}"
+HOST_ENTRY="$CUSTOM_NAME"
 
 info "Configuring SSH client..."
 
@@ -188,13 +212,55 @@ echo ""
 echo "   (This will use your SSH key for authentication)"
 echo ""
 
-# Ask if user wants to connect now
-read -p "Would you like to connect now with password to add the key? (y/n) " -n 1 -r
+# Ask if user wants to connect now and add key automatically
+read -p "Would you like to automatically add the key now? (y/n) " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    info "Connecting to schat with password authentication..."
+    info "Connecting to schat and automatically adding key..."
     echo ""
-    info "After logging in, run: /addkey"
+    info "You will be prompted for your password"
     echo ""
-    ssh "${HOST_ENTRY}-setup"
+    
+    # Create a temporary expect-like script using SSH and heredoc
+    # We'll use SSH with commands to automate the addkey process
+    TEMP_SCRIPT=$(mktemp)
+    cat > "$TEMP_SCRIPT" << 'SCRIPT_EOF'
+#!/bin/bash
+set -e
+
+# Read public key from stdin
+PUBLIC_KEY_CONTENT=$(cat)
+
+# Connect to SSH and send commands
+ssh -p "$1" -o PreferredAuthentications=keyboard-interactive,password "$2@$3" << EOF
+/addkey
+$PUBLIC_KEY_CONTENT
+END
+EOF
+SCRIPT_EOF
+    
+    chmod +x "$TEMP_SCRIPT"
+    
+    # Execute the script with parameters
+    if cat "$PUB_KEY_PATH" | "$TEMP_SCRIPT" "$PORT" "$USERNAME" "$HOSTNAME"; then
+        success "SSH key added successfully!"
+        echo ""
+        info "You can now connect using: ssh $HOST_ENTRY"
+        echo ""
+        
+        # Ask if user wants to connect now with the key
+        read -p "Would you like to connect now using your SSH key? (y/n) " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            info "Connecting with SSH key..."
+            ssh "$HOST_ENTRY"
+        fi
+    else
+        error "Failed to add SSH key automatically"
+        info "You can add it manually by connecting with: ssh ${HOST_ENTRY}-setup"
+        info "Then run: /addkey"
+    fi
+    
+    # Clean up temp script
+    rm -f "$TEMP_SCRIPT"
 fi

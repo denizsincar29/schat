@@ -119,6 +119,19 @@ docker compose up -d
 
 The `schat-connect.sh` script automates SSH key generation and configuration:
 
+**Interactive Mode (Recommended):**
+```bash
+# Run without arguments for interactive setup
+./schat-connect.sh
+```
+
+You'll be prompted for:
+- Hostname (default: denizsincar.ru)
+- Port (default: 2222)
+- Username
+- Custom name for SSH config (default: schat-{hostname})
+
+**Command-line Mode:**
 ```bash
 # Generate SSH key, configure SSH client, and connect
 ./schat-connect.sh username@hostname [port]
@@ -131,16 +144,13 @@ The `schat-connect.sh` script automates SSH key generation and configuration:
 The script will:
 1. Generate a new SSH key pair in `~/.ssh/`
 2. Add two entries to your SSH config:
-   - `schat-{hostname}-setup` for initial password-based connection
-   - `schat-{hostname}` for SSH key-based connection after setup
+   - `{custom-name}-setup` for initial password-based connection
+   - `{custom-name}` for SSH key-based connection after setup
 3. Display your public key to add via `/addkey` command
-4. Optionally connect you to the chat with password authentication
+4. **Automatically add the SSH key** by connecting with password and running `/addkey`
+5. Optionally connect you to the chat using your new SSH key
 
-After running the script:
-1. Connect using `ssh schat-{hostname}-setup` (uses password)
-2. Run `/addkey` command and paste the public key shown by the script
-3. Type `END` to finish
-4. Reconnect using `ssh schat-{hostname}` (uses SSH key)
+The automated key addition saves you from manually pasting the key!
 
 #### Manual Connection
 
