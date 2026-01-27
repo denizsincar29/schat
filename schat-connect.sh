@@ -93,9 +93,49 @@ HOST_ENTRY="schat-${HOSTNAME}"
 
 info "Configuring SSH client..."
 
-# Check if entry already exists
-if [ -f "$SSH_CONFIG" ] && (grep -q "Host ${HOST_ENTRY}-setup" "$SSH_CONFIG" || grep -q "Host $HOST_ENTRY" "$SSH_CONFIG"); then
+# Check if entries already exist
+SETUP_EXISTS=false
+MAIN_EXISTS=false
+if [ -f "$SSH_CONFIG" ]; then
+    grep -q "Host ${HOST_ENTRY}-setup" "$SSH_CONFIG" && SETUP_EXISTS=true
+    grep -q "Host $HOST_ENTRY\$" "$SSH_CONFIG" && MAIN_EXISTS=true
+fi
+
+if [ "$SETUP_EXISTS" = true ] && [ "$MAIN_EXISTS" = true ]; then
     info "SSH config entries already exist for $HOST_ENTRY"
+elif [ "$SETUP_EXISTS" = true ] || [ "$MAIN_EXISTS" = true ]; then
+    info "WARNING: Incomplete SSH config detected. Removing old entries and recreating..."
+    # Remove old entries
+    if [ -f "$SSH_CONFIG" ]; then
+        # Create a backup
+        cp "$SSH_CONFIG" "${SSH_CONFIG}.backup"
+        # Remove both entries if they exist
+        sed -i "/^# schat connection.*$/,/^$/{ /Host ${HOST_ENTRY}/,/^$/d; }" "$SSH_CONFIG"
+        sed -i "/^Host ${HOST_ENTRY}-setup$/,/^$/d" "$SSH_CONFIG"
+        sed -i "/^Host ${HOST_ENTRY}$/,/^$/d" "$SSH_CONFIG"
+    fi
+    # Add new entries
+    cat >> "$SSH_CONFIG" << EOF
+
+# schat connection (initial setup - use password first to add key)
+Host ${HOST_ENTRY}-setup
+    HostName $HOSTNAME
+    Port $PORT
+    User $USERNAME
+    PreferredAuthentications keyboard-interactive,password
+    StrictHostKeyChecking accept-new
+
+# schat connection (after key is added - use key auth)
+Host $HOST_ENTRY
+    HostName $HOSTNAME
+    Port $PORT
+    User $USERNAME
+    IdentityFile $KEY_PATH
+    PreferredAuthentications publickey
+    StrictHostKeyChecking accept-new
+
+EOF
+    success "Recreated SSH config entries: ${HOST_ENTRY}-setup and $HOST_ENTRY"
 else
     # Add new entry to SSH config
     cat >> "$SSH_CONFIG" << EOF
@@ -133,8 +173,6 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 echo "STEP 1: Connect with your password using:"
 echo "   ssh ${HOST_ENTRY}-setup"
-echo ""
-echo "   (Or manually: ssh -p $PORT -o PreferredAuthentications=keyboard-interactive,password $USER_HOST)"
 echo ""
 echo "STEP 2: Once connected, run the /addkey command and paste this public key:"
 echo ""
