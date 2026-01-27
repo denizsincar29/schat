@@ -25,6 +25,14 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	// Unicode block characters for QR code rendering
+	blockFull   = "█" // Full block (both top and bottom)
+	blockTop    = "▀" // Upper half block
+	blockBottom = "▄" // Lower half block
+	blockEmpty  = " " // Empty space
+)
+
 type Client struct {
 	User     *models.User
 	Conn     ssh.Channel
@@ -775,7 +783,9 @@ func handleQRCode(client *Client, args []string) {
 		displayName = client.User.Nickname
 	}
 
-	// Save message to database (store the data URL, not the rendered QR code)
+	// Save message to database
+	// Store in command format to maintain compatibility with Content field
+	// and allow potential re-rendering from history in the future
 	chatMsg := models.ChatMessage{
 		UserID:  client.User.ID,
 		RoomID:  client.User.CurrentRoomID,
@@ -815,13 +825,13 @@ func qrCodeToUnicode(qr *qrcode.QRCode) string {
 			
 			// Choose the appropriate Unicode block character
 			if topBlack && bottomBlack {
-				result.WriteString("█") // Full block
+				result.WriteString(blockFull)
 			} else if topBlack && !bottomBlack {
-				result.WriteString("▀") // Upper half block
+				result.WriteString(blockTop)
 			} else if !topBlack && bottomBlack {
-				result.WriteString("▄") // Lower half block
+				result.WriteString(blockBottom)
 			} else {
-				result.WriteString(" ") // Empty space
+				result.WriteString(blockEmpty)
 			}
 		}
 		result.WriteString("\n")

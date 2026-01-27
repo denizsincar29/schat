@@ -255,10 +255,29 @@ func GetAllCommands() []*Command {
 }
 
 func handleHelp(user *models.User, args []string) (string, error) {
+	// Special commands not in the regular command system
+	specialCommands := map[string]string{
+		"addkey": "Add SSH key to account (use 'pp' to preserve password, 'mr' for machine-readable output)",
+		"qr":     "Generate and send a QR code to the chat",
+	}
+
 	if len(args) > 0 {
-		cmd := GetCommand(args[0])
+		cmdName := args[0]
+		
+		// Check if it's a special command
+		if desc, ok := specialCommands[cmdName]; ok {
+			usage := fmt.Sprintf("/%s", cmdName)
+			if cmdName == "addkey" {
+				usage = "/addkey [pp] [mr]"
+			} else if cmdName == "qr" {
+				usage = "/qr <text or URL>"
+			}
+			return fmt.Sprintf("%s: %s\nUsage: %s", cmdName, desc, usage), nil
+		}
+		
+		cmd := GetCommand(cmdName)
 		if cmd == nil {
-			return "", fmt.Errorf("command not found: %s", args[0])
+			return "", fmt.Errorf("command not found: %s", cmdName)
 		}
 		aliases := strings.Join(cmd.Aliases, ", ")
 		return fmt.Sprintf("%s: %s\nUsage: %s\nAliases: %s", cmd.Name, cmd.Description, cmd.Usage, aliases), nil
@@ -266,6 +285,13 @@ func handleHelp(user *models.User, args []string) (string, error) {
 
 	var result strings.Builder
 	result.WriteString("Available commands:\n")
+	
+	// Add special commands first
+	for name, desc := range specialCommands {
+		result.WriteString(fmt.Sprintf("  /%s - %s\n", name, desc))
+	}
+	
+	// Add regular commands
 	for _, cmd := range GetAllCommands() {
 		if cmd.AdminOnly && !user.IsAdmin {
 			continue
