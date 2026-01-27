@@ -234,8 +234,9 @@ PUBLIC_KEY_CONTENT=$(cat)
 
 # Connect to SSH and send commands
 # Using printf to ensure proper line endings
+# Using /addkey mr for machine-readable output
 ssh -p "$1" -o PreferredAuthentications=keyboard-interactive,password "$2@$3" << EOF
-/addkey
+/addkey mr
 $PUBLIC_KEY_CONTENT
 END
 EOF
