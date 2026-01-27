@@ -263,7 +263,7 @@ func handleHelp(user *models.User, args []string) (string, error) {
 
 	if len(args) > 0 {
 		cmdName := args[0]
-		
+
 		// Check if it's a special command
 		if desc, ok := specialCommands[cmdName]; ok {
 			usage := fmt.Sprintf("/%s", cmdName)
@@ -274,7 +274,7 @@ func handleHelp(user *models.User, args []string) (string, error) {
 			}
 			return fmt.Sprintf("%s: %s\nUsage: %s", cmdName, desc, usage), nil
 		}
-		
+
 		cmd := GetCommand(cmdName)
 		if cmd == nil {
 			return "", fmt.Errorf("command not found: %s", cmdName)
@@ -285,12 +285,12 @@ func handleHelp(user *models.User, args []string) (string, error) {
 
 	var result strings.Builder
 	result.WriteString("Available commands:\n")
-	
+
 	// Add special commands first
 	for name, desc := range specialCommands {
 		result.WriteString(fmt.Sprintf("  /%s - %s\n", name, desc))
 	}
-	
+
 	// Add regular commands
 	for _, cmd := range GetAllCommands() {
 		if cmd.AdminOnly && !user.IsAdmin {
@@ -370,12 +370,12 @@ func handlePrivateMessage(user *models.User, args []string) (string, error) {
 	}
 
 	username := strings.TrimPrefix(args[0], "@")
-	
+
 	// Handle @admin - send to all admins
 	if username == "admin" {
 		return sendToAllAdmins(user, strings.Join(args[1:], " "))
 	}
-	
+
 	message := strings.Join(args[1:], " ")
 
 	var recipient models.User
@@ -883,7 +883,7 @@ func handleNews(user *models.User, args []string) (string, error) {
 			result.WriteString(fmt.Sprintf("From %s: %s\n", senderName, mention.Message.Content))
 		}
 		result.WriteString("\n")
-		
+
 		// Mark mentions as read
 		database.DB.Model(&models.Mention{}).Where("user_id = ? AND is_read = ?", user.ID, false).
 			Update("is_read", true)
@@ -947,7 +947,7 @@ func handleReport(user *models.User, args []string) (string, error) {
 		reportFile := fmt.Sprintf("%s/report@%s.log", reportsDir, username)
 		timestamp := time.Now().Format("2006-01-02 15:04:05")
 		reportContent := fmt.Sprintf("[%s] Reported by @%s: %s\n", timestamp, user.Username, reason)
-		
+
 		// Append to report file
 		f, err := openFile(reportFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err == nil {
@@ -1015,14 +1015,14 @@ func sendToAllAdmins(user *models.User, message string) (string, error) {
 		if admin.ID == user.ID {
 			continue // Don't send to yourself
 		}
-		
+
 		chatMsg := models.ChatMessage{
 			UserID:      user.ID,
 			Content:     message,
 			IsPrivate:   true,
 			RecipientID: &admin.ID,
 		}
-		
+
 		if err := database.DB.Create(&chatMsg).Error; err == nil {
 			count++
 		}

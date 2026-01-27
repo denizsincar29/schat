@@ -93,7 +93,7 @@ type Settings struct {
 type Report struct {
 	gorm.Model
 	ReporterID uint
-	Reporter   User   `gorm:"foreignKey:ReporterID"`
+	Reporter   User `gorm:"foreignKey:ReporterID"`
 	ReportedID uint
 	Reported   User   `gorm:"foreignKey:ReportedID"`
 	Reason     string `gorm:"type:text"`

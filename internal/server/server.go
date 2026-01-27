@@ -497,10 +497,10 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 						return "", 0, false
 					}
 					userPrefix = userPrefix[1:]
-					
+
 					// Add "admin" as a special completion option
 					completions = append(completions, "@admin")
-					
+
 					var users []models.User
 					// Use database filtering for efficiency
 					database.DB.Where("username LIKE ?", userPrefix+"%").Limit(10).Find(&users)
@@ -661,7 +661,7 @@ func handleAddKey(client *Client, args []string) {
 			return
 		}
 		line = strings.TrimSpace(line)
-		
+
 		// Check for private key markers - prevent users from pasting private keys
 		if isPrivateKeyMarker(line) {
 			fmt.Fprintf(client.Conn, "\n⚠️  WARNING: You appear to be pasting a PRIVATE key!\n")
@@ -670,7 +670,7 @@ func handleAddKey(client *Client, args []string) {
 			client.Terminal.SetPrompt(originalPrompt)
 			return
 		}
-		
+
 		if line == "END" {
 			break
 		}
@@ -697,12 +697,12 @@ func handleAddKey(client *Client, args []string) {
 
 	// Update user with SSH key
 	client.User.SSHKey = sshKey
-	
+
 	// Remove password unless preserve flag is set
 	if !preservePassword {
 		client.User.PasswordHash = ""
 	}
-	
+
 	if err := database.DB.Save(client.User).Error; err != nil {
 		fmt.Fprintf(client.Conn, "Failed to save SSH key: %v\n", err)
 		client.Terminal.SetPrompt(originalPrompt)
@@ -710,7 +710,7 @@ func handleAddKey(client *Client, args []string) {
 	}
 
 	logAction(client.User, "addkey", "Added SSH key to account")
-	
+
 	// Output success message - machine-readable or human-readable
 	if machineReadable {
 		fmt.Fprintf(client.Conn, "\nSUCCESS: SSH_KEY_ADDED\n")
@@ -722,7 +722,7 @@ func handleAddKey(client *Client, args []string) {
 			fmt.Fprintf(client.Conn, "Your password has been removed. You can now only login using your SSH key.\n")
 		}
 	}
-	
+
 	// Restore prompt
 	client.Terminal.SetPrompt(originalPrompt)
 }
@@ -732,11 +732,11 @@ func isPrivateKeyMarker(line string) bool {
 	lineUpper := strings.ToUpper(line)
 	// Check for various private key format markers
 	privateKeyIndicators := []string{
-		"PRIVATE KEY",     // Catches RSA, DSA, EC, OPENSSH PRIVATE KEY, etc.
-		"BEGIN PRIVATE",   // Additional safety
-		"END PRIVATE",     // Additional safety
+		"PRIVATE KEY",   // Catches RSA, DSA, EC, OPENSSH PRIVATE KEY, etc.
+		"BEGIN PRIVATE", // Additional safety
+		"END PRIVATE",   // Additional safety
 	}
-	
+
 	for _, indicator := range privateKeyIndicators {
 		if strings.Contains(lineUpper, indicator) {
 			return true
@@ -754,7 +754,7 @@ func handleQRCode(client *Client, args []string) {
 
 	// Join all arguments to support URLs and text with spaces
 	data := strings.Join(args, " ")
-	
+
 	// Check if user is in a room
 	if client.User.CurrentRoomID == nil {
 		fmt.Fprintf(client.Conn, "You are not in a room. Use /join <room> to join one.\n")
@@ -776,7 +776,7 @@ func handleQRCode(client *Client, args []string) {
 
 	// Convert QR code to string using Unicode blocks
 	qrString := qrCodeToUnicode(qr)
-	
+
 	// Get display name
 	displayName := client.User.Username
 	if client.User.Nickname != "" {
@@ -795,11 +795,11 @@ func handleQRCode(client *Client, args []string) {
 
 	// Create announcement message
 	announcement := fmt.Sprintf("%s sent a QR code:", displayName)
-	
+
 	// Broadcast announcement and QR code to room
 	fullMessage := announcement + "\n" + qrString
 	broadcastToRoom(*client.User.CurrentRoomID, fullMessage, client.User.ID)
-	
+
 	// Show to sender as well
 	fmt.Fprintf(client.Conn, "%s\n%s\n", announcement, qrString)
 
@@ -810,10 +810,10 @@ func handleQRCode(client *Client, args []string) {
 func qrCodeToUnicode(qr *qrcode.QRCode) string {
 	// Get the QR code bitmap
 	bitmap := qr.Bitmap()
-	
+
 	var result strings.Builder
 	result.WriteString("\n")
-	
+
 	// Process two rows at a time to use half-block characters
 	for y := 0; y < len(bitmap); y += 2 {
 		for x := 0; x < len(bitmap[y]); x++ {
@@ -822,7 +822,7 @@ func qrCodeToUnicode(qr *qrcode.QRCode) string {
 			if y+1 < len(bitmap) {
 				bottomBlack = bitmap[y+1][x]
 			}
-			
+
 			// Choose the appropriate Unicode block character
 			if topBlack && bottomBlack {
 				result.WriteString(blockFull)
@@ -837,7 +837,7 @@ func qrCodeToUnicode(qr *qrcode.QRCode) string {
 		result.WriteString("\n")
 	}
 	result.WriteString("\n")
-	
+
 	return result.String()
 }
 
@@ -887,7 +887,7 @@ func handleMessage(client *Client, message string) {
 			// Strip trailing punctuation
 			mentionedUsername := strings.TrimPrefix(word, "@")
 			mentionedUsername = strings.TrimRight(mentionedUsername, ".,!?;:")
-			
+
 			// Handle @admin - notify all admins
 			if mentionedUsername == "admin" {
 				var admins []models.User
@@ -911,7 +911,7 @@ func handleMessage(client *Client, message string) {
 				}
 				continue
 			}
-			
+
 			var mentionedUser models.User
 			if err := database.DB.Where("username = ? OR nickname = ?", mentionedUsername, mentionedUsername).
 				First(&mentionedUser).Error; err == nil {
@@ -1072,7 +1072,7 @@ func showChatHistory(channel ssh.Channel, user *models.User) {
 		if msg.User.Nickname != "" {
 			displayName = msg.User.Nickname
 		}
-		
+
 		// Format message
 		content := msg.Content
 		if strings.HasPrefix(content, "@me ") {
