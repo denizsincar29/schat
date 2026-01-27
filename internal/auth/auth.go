@@ -22,6 +22,11 @@ const (
 	threads  = 4
 )
 
+var (
+	// Reserved usernames that cannot be used for new accounts
+	reservedUsernames = []string{"me", "admin", "help", "system", "root", "all", "everyone", "here"}
+)
+
 // HashPassword creates a secure hash of the password
 func HashPassword(password string) (string, error) {
 	salt := make([]byte, saltSize)
@@ -94,6 +99,24 @@ func AuthenticateUser(username string, password string, publicKey ssh.PublicKey)
 
 // CreateUser creates a new user
 func CreateUser(username string, password string, sshKey string, isAdmin bool) (*models.User, error) {
+	// Validate username - check for reserved names
+	usernameLower := strings.ToLower(username)
+	for _, reserved := range reservedUsernames {
+		if usernameLower == reserved {
+			return nil, fmt.Errorf("username '%s' is reserved and cannot be used", username)
+		}
+	}
+
+	// Check for minimum length
+	if len(username) < 2 {
+		return nil, fmt.Errorf("username must be at least 2 characters long")
+	}
+
+	// Check for maximum length
+	if len(username) > 32 {
+		return nil, fmt.Errorf("username must be at most 32 characters long")
+	}
+
 	var existingUser models.User
 	if err := database.DB.Where("username = ?", username).First(&existingUser).Error; err == nil {
 		return nil, fmt.Errorf("username already exists")

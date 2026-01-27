@@ -339,6 +339,8 @@ func handleRegistration(channel ssh.Channel, username string) {
 		fmt.Fprintf(channel, "\r\nRegistration successful! You are the first user and have been granted admin privileges.\r\n")
 	} else {
 		fmt.Fprintf(channel, "\r\nRegistration successful!\r\n")
+		// Notify all admins about new user registration
+		sendNotificationToAdmins("user_registered", fmt.Sprintf("New user registered: %s", username), &newUser.ID, nil)
 	}
 
 	logAction(newUser, "register", "User registered")
@@ -406,6 +408,9 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 	fmt.Fprintf(channel, "Type /help for available commands.\n")
 	fmt.Fprintf(channel, "\n")
 
+	// Deliver offline notifications
+	deliverOfflineNotifications(client)
+
 	// Show chat history (last 10 events)
 	showChatHistory(channel, user)
 
@@ -469,9 +474,15 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 		} else if len(words) > 0 && (words[0] == "/join" || words[0] == "/j" || 
 			words[0] == "/permanent" || words[0] == "/perm" || words[0] == "/makepermanent" ||
 			words[0] == "/hide" || words[0] == "/hideroom" ||
-			words[0] == "/unhide" || words[0] == "/unhideroom" || words[0] == "/show") && len(words) <= 2 {
+			words[0] == "/unhide" || words[0] == "/unhideroom" || words[0] == "/show" ||
+			words[0] == "/move" || words[0] == "/moveuser" ||
+			words[0] == "/setpassword" || words[0] == "/roompassword" || words[0] == "/setpass") && len(words) <= 2 {
 			// Room name completion after room-related commands
 			roomPrefix := strings.ToLower(wordToComplete)
+			// Strip # prefix if present for matching
+			if strings.HasPrefix(roomPrefix, "#") {
+				roomPrefix = roomPrefix[1:]
+			}
 			var rooms []models.Room
 			
 			// Filter hidden rooms for non-admins on /join
@@ -483,42 +494,60 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 			query.Find(&rooms)
 			for _, r := range rooms {
 				if strings.HasPrefix(strings.ToLower(r.Name), roomPrefix) {
-					completions = append(completions, r.Name)
+					// Add # prefix to room names in autocomplete
+					completions = append(completions, "#"+r.Name)
 				}
 			}
 		} else if len(words) > 0 {
-			// Check if command needs username completion
-			cmdName := strings.ToLower(words[0])
-			if strings.HasPrefix(cmdName, "/") {
-				cmdName = cmdName[1:]
-			}
-			cmd := commands.GetCommand(cmdName)
-			if cmd != nil {
-				// Commands that take username as argument - require @ prefix
-				usernameCommands := map[string]bool{
-					"msg": true, "pm": true, "whisper": true, "w": true,
-					"ban": true, "b": true, "kick": true, "k": true,
-					"mute": true, "silence": true, "unban": true, "ub": true,
-					"unmute": true, "um": true, "promote": true, "makeadmin": true,
-					"demote": true, "removeadmin": true, "deleteuser": true,
-					"deluser": true, "removeuser": true, "report": true, "reportuser": true,
-				}
-				if usernameCommands[cmdName] {
-					// Ensure @ prefix for username completion
-					userPrefix := wordToComplete
-					if !strings.HasPrefix(userPrefix, "@") {
-						return "", 0, false
+			// Check if we're completing a help topic
+			if (words[0] == "/help" || words[0] == "/h") && len(words) <= 2 {
+				topicPrefix := strings.ToLower(wordToComplete)
+				topics := []string{"rooms", "messaging", "user", "moderation", "admin"}
+				for _, topic := range topics {
+					if strings.HasPrefix(topic, topicPrefix) {
+						completions = append(completions, topic)
 					}
-					userPrefix = userPrefix[1:]
+				}
+				// Also add all command names for help
+				for cmdName := range commands.Commands {
+					if strings.HasPrefix(cmdName, topicPrefix) {
+						completions = append(completions, cmdName)
+					}
+				}
+			} else {
+				// Check if command needs username completion
+				cmdName := strings.ToLower(words[0])
+				if strings.HasPrefix(cmdName, "/") {
+					cmdName = cmdName[1:]
+				}
+				cmd := commands.GetCommand(cmdName)
+				if cmd != nil {
+					// Commands that take username as argument - require @ prefix
+					usernameCommands := map[string]bool{
+						"msg": true, "pm": true, "whisper": true, "w": true,
+						"ban": true, "b": true, "kick": true, "k": true,
+						"mute": true, "silence": true, "unban": true, "ub": true,
+						"unmute": true, "um": true, "promote": true, "makeadmin": true,
+						"demote": true, "removeadmin": true, "deleteuser": true,
+						"deluser": true, "removeuser": true, "report": true, "reportuser": true,
+					}
+					if usernameCommands[cmdName] {
+						// Ensure @ prefix for username completion
+						userPrefix := wordToComplete
+						if !strings.HasPrefix(userPrefix, "@") {
+							return "", 0, false
+						}
+						userPrefix = userPrefix[1:]
 
-					// Add "admin" as a special completion option
-					completions = append(completions, "@admin")
+						// Add "admin" as a special completion option
+						completions = append(completions, "@admin")
 
-					var users []models.User
-					// Use database filtering for efficiency
-					database.DB.Where("username LIKE ?", userPrefix+"%").Limit(10).Find(&users)
-					for _, u := range users {
-						completions = append(completions, "@"+u.Username)
+						var users []models.User
+						// Use database filtering for efficiency
+						database.DB.Where("username LIKE ?", userPrefix+"%").Limit(10).Find(&users)
+						for _, u := range users {
+							completions = append(completions, "@"+u.Username)
+						}
 					}
 				}
 			}
@@ -608,10 +637,95 @@ func handleCommand(client *Client, line string) {
 		return
 	}
 
+	// Check if user is asking for help
+	if len(args) > 0 && (args[0] == "?" || args[0] == "help" || args[0] == "--help") {
+		fmt.Fprintf(client.Conn, "Command: %s\n", cmd.Name)
+		if len(cmd.Aliases) > 0 {
+			fmt.Fprintf(client.Conn, "Aliases: %s\n", strings.Join(cmd.Aliases, ", "))
+		}
+		fmt.Fprintf(client.Conn, "Description: %s\n", cmd.Description)
+		fmt.Fprintf(client.Conn, "Usage: %s\n", cmd.Usage)
+		return
+	}
+
+	// Store previous room for movement tracking
+	var previousRoomID *uint
+	var previousRoom *models.Room
+	if cmdName == "join" || cmdName == "j" || cmdName == "room" {
+		previousRoomID = client.User.CurrentRoomID
+		if previousRoomID != nil {
+			database.DB.First(&previousRoom, *previousRoomID)
+		}
+	}
+
 	result, err := cmd.Handler(client.User, args)
 	if err != nil {
 		fmt.Fprintf(client.Conn, "Error: %v\n", err)
 		return
+	}
+
+	// Handle post-command notifications
+	if result != "" {
+		// Reload user to get updated data (e.g., new CurrentRoomID after join)
+		database.DB.First(client.User, client.User.ID)
+
+		switch cmdName {
+		case "create":
+			// Room was created, notify admins
+			if len(args) > 0 {
+				roomName := args[0]
+				var room models.Room
+				if err := database.DB.Where("name = ?", roomName).First(&room).Error; err == nil {
+					sendNotificationToAdmins("room_created", 
+						fmt.Sprintf("Room created: %s by %s", roomName, client.User.Username),
+						&client.User.ID, &room.ID)
+				}
+			}
+		case "join", "j", "room":
+			// User joined a room
+			if client.User.CurrentRoomID != nil && len(args) > 0 {
+				var newRoom models.Room
+				if err := database.DB.First(&newRoom, *client.User.CurrentRoomID).Error; err == nil {
+					// Notify admins if room join notifications are enabled
+					// Check setting for admin room join notifications
+					var setting models.Settings
+					showJoinNotifs := false
+					if err := database.DB.Where("key = ?", "admin_room_join_notifications").First(&setting).Error; err == nil {
+						showJoinNotifs = setting.Value == "true"
+					}
+					if showJoinNotifs {
+						var fromMsg string
+						if previousRoom != nil {
+							fromMsg = fmt.Sprintf(" from %s", previousRoom.Name)
+						}
+						sendNotificationToAdmins("user_joined_room",
+							fmt.Sprintf("%s joined room %s%s", client.User.Username, newRoom.Name, fromMsg),
+							&client.User.ID, &newRoom.ID)
+					}
+
+					// Notify room creator about user movement
+					if newRoom.CreatorID != nil && *newRoom.CreatorID != client.User.ID {
+						var fromMsg string
+						if previousRoom != nil {
+							fromMsg = fmt.Sprintf(" from %s", previousRoom.Name)
+						}
+						sendNotificationToUser(*newRoom.CreatorID, "user_joined_room",
+							fmt.Sprintf("%s joined your room %s%s", client.User.Username, newRoom.Name, fromMsg),
+							&client.User.ID, &newRoom.ID)
+					}
+
+					// Notify previous room creator about user leaving
+					if previousRoom != nil && previousRoom.CreatorID != nil && 
+						*previousRoom.CreatorID != client.User.ID &&
+						(client.User.CurrentRoomID == nil || previousRoom.ID != *client.User.CurrentRoomID) {
+						sendNotificationToUser(*previousRoom.CreatorID, "user_left_room",
+							fmt.Sprintf("%s left your room %s and went to %s", 
+								client.User.Username, previousRoom.Name, newRoom.Name),
+							&client.User.ID, &previousRoom.ID)
+					}
+				}
+			}
+		}
 	}
 
 	if result != "" {
@@ -970,6 +1084,101 @@ func broadcastToRoom(roomID uint, message string, excludeUserID uint) {
 			client.Mutex.Unlock()
 		}
 	}
+}
+
+// createNotification creates a notification in the database
+func createNotification(userID uint, notifType string, message string, relatedUser *uint, relatedRoom *uint) {
+	notification := models.Notification{
+		UserID:      userID,
+		Type:        notifType,
+		Message:     message,
+		RelatedUser: relatedUser,
+		RelatedRoom: relatedRoom,
+	}
+	if err := database.DB.Create(&notification).Error; err != nil {
+		log.Printf("Error creating notification: %v", err)
+	}
+}
+
+// sendNotificationToAdmins sends a notification to all admins (online and offline)
+func sendNotificationToAdmins(notifType string, message string, relatedUser *uint, relatedRoom *uint) {
+	// Get all admin users
+	var admins []models.User
+	if err := database.DB.Where("is_admin = ?", true).Find(&admins).Error; err != nil {
+		log.Printf("Error fetching admins for notification: %v", err)
+		return
+	}
+
+	for _, admin := range admins {
+		// Create notification in database
+		createNotification(admin.ID, notifType, message, relatedUser, relatedRoom)
+
+		// If admin is online, send immediately
+		server.mutex.RLock()
+		if client, ok := server.clients[admin.ID]; ok {
+			client.Mutex.Lock()
+			client.Terminal.Write([]byte(fmt.Sprintf("\r\n[ADMIN] %s\r\n", message)))
+			if client.User.BellEnabled {
+				client.Terminal.Write([]byte("\a"))
+			}
+			client.Mutex.Unlock()
+		}
+		server.mutex.RUnlock()
+	}
+}
+
+// sendNotificationToUser sends a notification to a specific user (online or offline)
+func sendNotificationToUser(userID uint, notifType string, message string, relatedUser *uint, relatedRoom *uint) {
+	// Create notification in database
+	createNotification(userID, notifType, message, relatedUser, relatedRoom)
+
+	// If user is online, send immediately
+	server.mutex.RLock()
+	if client, ok := server.clients[userID]; ok {
+		client.Mutex.Lock()
+		client.Terminal.Write([]byte(fmt.Sprintf("\r\n[Notification] %s\r\n", message)))
+		if client.User.BellEnabled {
+			client.Terminal.Write([]byte("\a"))
+		}
+		client.Mutex.Unlock()
+	}
+	server.mutex.RUnlock()
+}
+
+// deliverOfflineNotifications sends unread notifications to a user when they log in
+func deliverOfflineNotifications(client *Client) {
+	var notifications []models.Notification
+	if err := database.DB.Where("user_id = ? AND is_read = ?", client.User.ID, false).
+		Order("created_at desc").
+		Limit(20). // Limit to last 20 unread notifications
+		Find(&notifications).Error; err != nil {
+		log.Printf("Error fetching offline notifications: %v", err)
+		return
+	}
+
+	if len(notifications) == 0 {
+		return
+	}
+
+	client.Mutex.Lock()
+	defer client.Mutex.Unlock()
+
+	client.Terminal.Write([]byte("\r\n=== Notifications ===\r\n"))
+	// Reverse order to show oldest first
+	for i := len(notifications) - 1; i >= 0; i-- {
+		notif := notifications[i]
+		client.Terminal.Write([]byte(fmt.Sprintf("  %s\r\n", notif.Message)))
+	}
+	client.Terminal.Write([]byte(fmt.Sprintf("=== %d unread notification(s) ===\r\n\r\n", len(notifications))))
+
+	// Mark delivered notifications as read using their specific IDs
+	notificationIDs := make([]uint, len(notifications))
+	for i, notif := range notifications {
+		notificationIDs[i] = notif.ID
+	}
+	database.DB.Model(&models.Notification{}).
+		Where("id IN ?", notificationIDs).
+		Update("is_read", true)
 }
 
 // cleanupEmptyRooms removes non-permanent rooms that have no users

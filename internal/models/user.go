@@ -32,7 +32,8 @@ type Room struct {
 	IsHidden    bool `gorm:"default:false"`
 	IsPermanent bool `gorm:"default:false"`
 	CreatorID   *uint
-	Creator     *User `gorm:"foreignKey:CreatorID;constraint:OnDelete:SET NULL;"`
+	Creator     *User  `gorm:"foreignKey:CreatorID;constraint:OnDelete:SET NULL;"`
+	Password    string // Password for passworded rooms (hashed)
 }
 
 type ChatMessage struct {
@@ -100,4 +101,15 @@ type Report struct {
 	Reported   User   `gorm:"foreignKey:ReportedID"`
 	Reason     string `gorm:"type:text"`
 	IsRead     bool   `gorm:"default:false"`
+}
+
+type Notification struct {
+	gorm.Model
+	UserID      uint
+	User        User   `gorm:"foreignKey:UserID"`
+	Type        string `gorm:"not null"` // user_registered, room_created, user_joined_room, user_left_room
+	Message     string `gorm:"type:text"`
+	IsRead      bool   `gorm:"default:false"`
+	RelatedUser *uint  // User who performed the action
+	RelatedRoom *uint  // Room related to the action
 }

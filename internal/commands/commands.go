@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/denizsincar29/schat/internal/auth"
 	"github.com/denizsincar29/schat/internal/database"
 	"github.com/denizsincar29/schat/internal/models"
 )
@@ -14,6 +15,11 @@ import (
 const (
 	minDuration = 2 * time.Minute
 	maxDuration = 24 * time.Hour
+)
+
+var (
+	// Reserved names that cannot be used for rooms
+	reservedRoomNames = []string{"general", "admin", "system", "all", "everyone", "here"}
 )
 
 type Command struct {
@@ -48,7 +54,7 @@ func init() {
 		Name:        "join",
 		Aliases:     []string{"j", "room"},
 		Description: "Join a room",
-		Usage:       "/join <room_name>",
+		Usage:       "/join #<room_name> [password]",
 		Handler:     handleJoin,
 	})
 
@@ -56,7 +62,7 @@ func init() {
 		Name:        "create",
 		Aliases:     []string{"cr", "createroom"},
 		Description: "Create a new room",
-		Usage:       "/create <room_name> [description]",
+		Usage:       "/create #<room_name> [--password <password>] [description]",
 		Handler:     handleCreate,
 	})
 
@@ -72,7 +78,7 @@ func init() {
 		Name:        "permanent",
 		Aliases:     []string{"perm", "makepermanent"},
 		Description: "Make a room permanent (admin only)",
-		Usage:       "/permanent <room_name>",
+		Usage:       "/permanent #<room_name>",
 		Handler:     handlePermanent,
 		AdminOnly:   true,
 	})
@@ -81,7 +87,7 @@ func init() {
 		Name:        "hide",
 		Aliases:     []string{"hideroom"},
 		Description: "Hide a room from non-admins (admin only)",
-		Usage:       "/hide <room_name>",
+		Usage:       "/hide #<room_name>",
 		Handler:     handleHide,
 		AdminOnly:   true,
 	})
@@ -90,7 +96,7 @@ func init() {
 		Name:        "unhide",
 		Aliases:     []string{"unhideroom", "show"},
 		Description: "Unhide a room (admin only)",
-		Usage:       "/unhide <room_name>",
+		Usage:       "/unhide #<room_name>",
 		Handler:     handleUnhide,
 		AdminOnly:   true,
 	})
@@ -264,6 +270,41 @@ func init() {
 		Handler:     handleMarkReports,
 		AdminOnly:   true,
 	})
+
+	registerCommand(&Command{
+		Name:        "move",
+		Aliases:     []string{"moveuser"},
+		Description: "Move a user to a different room (admin only)",
+		Usage:       "/move @<username> #<room_name>",
+		Handler:     handleMove,
+		AdminOnly:   true,
+	})
+
+	registerCommand(&Command{
+		Name:        "listusers",
+		Aliases:     []string{"allusers", "users"},
+		Description: "List all user accounts (admin only)",
+		Usage:       "/listusers",
+		Handler:     handleListUsers,
+		AdminOnly:   true,
+	})
+
+	registerCommand(&Command{
+		Name:        "viewuser",
+		Aliases:     []string{"userinfo"},
+		Description: "View detailed user information (admin only)",
+		Usage:       "/viewuser @<username>",
+		Handler:     handleViewUser,
+		AdminOnly:   true,
+	})
+
+	registerCommand(&Command{
+		Name:        "setpassword",
+		Aliases:     []string{"roompassword", "setpass"},
+		Description: "Set or change room password (room creator or admin only)",
+		Usage:       "/setpassword #<room_name> <password> (use 'none' to remove)",
+		Handler:     handleSetPassword,
+	})
 }
 
 func registerCommand(cmd *Command) {
@@ -275,6 +316,13 @@ func registerCommand(cmd *Command) {
 
 func GetCommand(name string) *Command {
 	return Commands[name]
+}
+
+// stripPrefixes removes @ prefix from usernames and # prefix from room names
+func stripPrefixes(name string) string {
+	name = strings.TrimPrefix(name, "@")
+	name = strings.TrimPrefix(name, "#")
+	return name
 }
 
 func GetAllCommands() []*Command {
@@ -449,18 +497,21 @@ func handleRooms(user *models.User, args []string) (string, error) {
 		if room.IsPermanent {
 			indicators += " [Permanent]"
 		}
+		if room.Password != "" {
+			indicators += " [Password-protected]"
+		}
 		
-		result.WriteString(fmt.Sprintf("%s %s - %s%s\n", marker, room.Name, room.Description, indicators))
+		result.WriteString(fmt.Sprintf("%s #%s - %s%s\n", marker, room.Name, room.Description, indicators))
 	}
 	return result.String(), nil
 }
 
 func handleJoin(user *models.User, args []string) (string, error) {
 	if len(args) < 1 {
-		return "", fmt.Errorf("usage: /join <room_name>")
+		return "", fmt.Errorf("usage: /join #<room_name> [password]")
 	}
 
-	roomName := args[0]
+	roomName := stripPrefixes(args[0])
 	var room models.Room
 	if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
 		return "", fmt.Errorf("room not found: %s", roomName)
@@ -471,24 +522,70 @@ func handleJoin(user *models.User, args []string) (string, error) {
 		return "", fmt.Errorf("room not found: %s", roomName)
 	}
 
+	// Check if room has a password
+	if room.Password != "" {
+		// Room is password-protected
+		if len(args) < 2 {
+			return "", fmt.Errorf("this room requires a password. Usage: /join #<room_name> <password>")
+		}
+		password := args[1]
+		// Verify password
+		if !auth.VerifyPassword(password, room.Password) {
+			return "", fmt.Errorf("incorrect password for room %s", roomName)
+		}
+	}
+
 	user.CurrentRoomID = &room.ID
 	if err := database.DB.Save(user).Error; err != nil {
 		return "", fmt.Errorf("failed to join room: %w", err)
 	}
 
-	return fmt.Sprintf("Joined room: %s", room.Name), nil
+	return fmt.Sprintf("Joined room: #%s", room.Name), nil
 }
 
 func handleCreate(user *models.User, args []string) (string, error) {
 	if len(args) < 1 {
-		return "", fmt.Errorf("usage: /create <room_name> [description]")
+		return "", fmt.Errorf("usage: /create #<room_name> [--password <password>] [description]")
 	}
 
-	roomName := args[0]
-	description := ""
-	if len(args) > 1 {
-		description = strings.Join(args[1:], " ")
+	roomName := stripPrefixes(args[0])
+	
+	// Validate room name - check for reserved names
+	roomNameLower := strings.ToLower(roomName)
+	for _, reserved := range reservedRoomNames {
+		if roomNameLower == reserved {
+			return "", fmt.Errorf("room name '%s' is reserved and cannot be used", roomName)
+		}
 	}
+
+	// Check for minimum length
+	if len(roomName) < 2 {
+		return "", fmt.Errorf("room name must be at least 2 characters long")
+	}
+
+	// Check for maximum length
+	if len(roomName) > 32 {
+		return "", fmt.Errorf("room name must be at most 32 characters long")
+	}
+
+	// Parse arguments for password and description
+	var password string
+	var descriptionParts []string
+	i := 1
+	for i < len(args) {
+		if args[i] == "--password" || args[i] == "-p" {
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("--password flag requires a password argument")
+			}
+			password = args[i+1]
+			i += 2
+		} else {
+			descriptionParts = append(descriptionParts, args[i])
+			i++
+		}
+	}
+	
+	description := strings.Join(descriptionParts, " ")
 
 	creatorID := user.ID
 	room := models.Room{
@@ -497,11 +594,23 @@ func handleCreate(user *models.User, args []string) (string, error) {
 		CreatorID:   &creatorID,
 	}
 
+	// Hash password if provided
+	if password != "" {
+		hashedPassword, err := auth.HashPassword(password)
+		if err != nil {
+			return "", fmt.Errorf("failed to hash password: %w", err)
+		}
+		room.Password = hashedPassword
+	}
+
 	if err := database.DB.Create(&room).Error; err != nil {
 		return "", fmt.Errorf("failed to create room: %w", err)
 	}
 
-	return fmt.Sprintf("Created room: %s", roomName), nil
+	if password != "" {
+		return fmt.Sprintf("Created password-protected room: #%s", roomName), nil
+	}
+	return fmt.Sprintf("Created room: #%s", roomName), nil
 }
 
 func handleLeave(user *models.User, args []string) (string, error) {
@@ -530,17 +639,17 @@ func handleLeave(user *models.User, args []string) (string, error) {
 
 func handlePermanent(user *models.User, args []string) (string, error) {
 	if len(args) < 1 {
-		return "", fmt.Errorf("usage: /permanent <room_name>")
+		return "", fmt.Errorf("usage: /permanent #<room_name>")
 	}
 	
-	roomName := args[0]
+	roomName := stripPrefixes(args[0])
 	var room models.Room
 	if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
 		return "", fmt.Errorf("room not found: %s", roomName)
 	}
 	
 	if room.IsPermanent {
-		return "", fmt.Errorf("room %s is already permanent", roomName)
+		return "", fmt.Errorf("room #%s is already permanent", roomName)
 	}
 	
 	room.IsPermanent = true
@@ -549,22 +658,22 @@ func handlePermanent(user *models.User, args []string) (string, error) {
 	}
 	
 	logAction(user, "permanent", fmt.Sprintf("Made room %s permanent", roomName))
-	return fmt.Sprintf("Room %s is now permanent", roomName), nil
+	return fmt.Sprintf("Room #%s is now permanent", roomName), nil
 }
 
 func handleHide(user *models.User, args []string) (string, error) {
 	if len(args) < 1 {
-		return "", fmt.Errorf("usage: /hide <room_name>")
+		return "", fmt.Errorf("usage: /hide #<room_name>")
 	}
 	
-	roomName := args[0]
+	roomName := stripPrefixes(args[0])
 	var room models.Room
 	if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
 		return "", fmt.Errorf("room not found: %s", roomName)
 	}
 	
 	if room.IsHidden {
-		return "", fmt.Errorf("room %s is already hidden", roomName)
+		return "", fmt.Errorf("room #%s is already hidden", roomName)
 	}
 	
 	room.IsHidden = true
@@ -573,22 +682,22 @@ func handleHide(user *models.User, args []string) (string, error) {
 	}
 	
 	logAction(user, "hide", fmt.Sprintf("Hid room %s", roomName))
-	return fmt.Sprintf("Room %s is now hidden", roomName), nil
+	return fmt.Sprintf("Room #%s is now hidden", roomName), nil
 }
 
 func handleUnhide(user *models.User, args []string) (string, error) {
 	if len(args) < 1 {
-		return "", fmt.Errorf("usage: /unhide <room_name>")
+		return "", fmt.Errorf("usage: /unhide #<room_name>")
 	}
 	
-	roomName := args[0]
+	roomName := stripPrefixes(args[0])
 	var room models.Room
 	if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
 		return "", fmt.Errorf("room not found: %s", roomName)
 	}
 	
 	if !room.IsHidden {
-		return "", fmt.Errorf("room %s is not hidden", roomName)
+		return "", fmt.Errorf("room #%s is not hidden", roomName)
 	}
 	
 	room.IsHidden = false
@@ -597,7 +706,7 @@ func handleUnhide(user *models.User, args []string) (string, error) {
 	}
 	
 	logAction(user, "unhide", fmt.Sprintf("Unhid room %s", roomName))
-	return fmt.Sprintf("Room %s is now visible", roomName), nil
+	return fmt.Sprintf("Room #%s is now visible", roomName), nil
 }
 
 func handlePrivateMessage(user *models.User, args []string) (string, error) {
@@ -1282,4 +1391,180 @@ func handleMarkReports(user *models.User, args []string) (string, error) {
 	}
 
 	return fmt.Sprintf("Marked %d report(s) as read", result.RowsAffected), nil
+}
+
+func handleMove(user *models.User, args []string) (string, error) {
+	if len(args) < 2 {
+		return "", fmt.Errorf("usage: /move @<username> #<room_name>")
+	}
+
+	username := stripPrefixes(args[0])
+	roomName := stripPrefixes(args[1])
+
+	// Find the target user
+	var targetUser models.User
+	if err := database.DB.Where("username = ?", username).First(&targetUser).Error; err != nil {
+		return "", fmt.Errorf("user not found: %s", username)
+	}
+
+	// Find the target room
+	var room models.Room
+	if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
+		return "", fmt.Errorf("room not found: %s", roomName)
+	}
+
+	// Move the user (even if room is hidden, as per requirement)
+	targetUser.CurrentRoomID = &room.ID
+	if err := database.DB.Save(&targetUser).Error; err != nil {
+		return "", fmt.Errorf("failed to move user: %w", err)
+	}
+
+	return fmt.Sprintf("Moved @%s to room #%s", username, roomName), nil
+}
+
+func handleListUsers(user *models.User, args []string) (string, error) {
+	var users []models.User
+	if err := database.DB.Order("username").Find(&users).Error; err != nil {
+		return "", fmt.Errorf("failed to fetch users: %w", err)
+	}
+
+	if len(users) == 0 {
+		return "No users found", nil
+	}
+
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("Total users: %d\n\n", len(users)))
+	result.WriteString("Username          | Admin | Banned | Muted | Last Seen\n")
+	result.WriteString("------------------+-------+--------+-------+-----------\n")
+
+	for _, u := range users {
+		admin := " "
+		if u.IsAdmin {
+			admin = "Y"
+		}
+		banned := " "
+		if u.IsBanned {
+			banned = "Y"
+		}
+		muted := " "
+		if u.IsMuted {
+			muted = "Y"
+		}
+		lastSeen := "Never"
+		if !u.LastSeenAt.IsZero() {
+			lastSeen = u.LastSeenAt.Format("2006-01-02 15:04")
+		}
+		result.WriteString(fmt.Sprintf("%-17s | %-5s | %-6s | %-5s | %s\n",
+			u.Username, admin, banned, muted, lastSeen))
+	}
+
+	return result.String(), nil
+}
+
+func handleViewUser(user *models.User, args []string) (string, error) {
+	if len(args) < 1 {
+		return "", fmt.Errorf("usage: /viewuser @<username>")
+	}
+
+	username := stripPrefixes(args[0])
+
+	var targetUser models.User
+	if err := database.DB.Preload("CurrentRoom").Where("username = ?", username).First(&targetUser).Error; err != nil {
+		return "", fmt.Errorf("user not found: %s", username)
+	}
+
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("=== User Information: %s ===\n\n", targetUser.Username))
+	result.WriteString(fmt.Sprintf("ID: %d\n", targetUser.ID))
+	result.WriteString(fmt.Sprintf("Username: %s\n", targetUser.Username))
+	
+	if targetUser.Nickname != "" {
+		result.WriteString(fmt.Sprintf("Nickname: %s\n", targetUser.Nickname))
+	}
+	
+	if targetUser.Status != "" {
+		result.WriteString(fmt.Sprintf("Status: %s\n", targetUser.Status))
+	}
+
+	result.WriteString(fmt.Sprintf("Is Admin: %v\n", targetUser.IsAdmin))
+	result.WriteString(fmt.Sprintf("Is Banned: %v\n", targetUser.IsBanned))
+	if targetUser.IsBanned && targetUser.BanExpiresAt != nil {
+		result.WriteString(fmt.Sprintf("Ban Expires: %s\n", targetUser.BanExpiresAt.Format("2006-01-02 15:04:05")))
+	}
+	
+	result.WriteString(fmt.Sprintf("Is Muted: %v\n", targetUser.IsMuted))
+	if targetUser.IsMuted && targetUser.MuteExpiresAt != nil {
+		result.WriteString(fmt.Sprintf("Mute Expires: %s\n", targetUser.MuteExpiresAt.Format("2006-01-02 15:04:05")))
+	}
+
+	result.WriteString(fmt.Sprintf("Bell Enabled: %v\n", targetUser.BellEnabled))
+	
+	if targetUser.CurrentRoom != nil {
+		result.WriteString(fmt.Sprintf("Current Room: #%s\n", targetUser.CurrentRoom.Name))
+	} else {
+		result.WriteString("Current Room: None\n")
+	}
+
+	if !targetUser.LastSeenAt.IsZero() {
+		result.WriteString(fmt.Sprintf("Last Seen: %s\n", targetUser.LastSeenAt.Format("2006-01-02 15:04:05")))
+	}
+
+	result.WriteString(fmt.Sprintf("Created: %s\n", targetUser.CreatedAt.Format("2006-01-02 15:04:05")))
+	result.WriteString(fmt.Sprintf("Updated: %s\n", targetUser.UpdatedAt.Format("2006-01-02 15:04:05")))
+
+	hasPassword := "No"
+	if targetUser.PasswordHash != "" {
+		hasPassword = "Yes"
+	}
+	result.WriteString(fmt.Sprintf("Has Password: %s\n", hasPassword))
+
+	hasSSHKey := "No"
+	if targetUser.SSHKey != "" {
+		hasSSHKey = "Yes"
+	}
+	result.WriteString(fmt.Sprintf("Has SSH Key: %s\n", hasSSHKey))
+
+	return result.String(), nil
+}
+
+func handleSetPassword(user *models.User, args []string) (string, error) {
+	if len(args) < 2 {
+		return "", fmt.Errorf("usage: /setpassword #<room_name> <password> (use 'none' to remove)")
+	}
+
+	roomName := stripPrefixes(args[0])
+	password := args[1]
+
+	// Find the room
+	var room models.Room
+	if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
+		return "", fmt.Errorf("room not found: %s", roomName)
+	}
+
+	// Check if user is the creator or an admin
+	if room.CreatorID == nil || (*room.CreatorID != user.ID && !user.IsAdmin) {
+		return "", fmt.Errorf("only the room creator or admins can set the password")
+	}
+
+	// Handle password removal
+	if password == "none" || password == "" {
+		room.Password = ""
+		if err := database.DB.Save(&room).Error; err != nil {
+			return "", fmt.Errorf("failed to remove password: %w", err)
+		}
+		return fmt.Sprintf("Password removed from room: #%s", roomName), nil
+	}
+
+	// Hash the new password
+	hashedPassword, err := auth.HashPassword(password)
+	if err != nil {
+		return "", fmt.Errorf("failed to hash password: %w", err)
+	}
+
+	room.Password = hashedPassword
+	if err := database.DB.Save(&room).Error; err != nil {
+		return "", fmt.Errorf("failed to set password: %w", err)
+	}
+
+	return fmt.Sprintf("Password set for room: #%s", roomName), nil
 }
