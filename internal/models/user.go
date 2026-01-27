@@ -29,6 +29,8 @@ type Room struct {
 	Name        string `gorm:"unique;not null"`
 	Description string
 	IsPrivate   bool `gorm:"default:false"`
+	IsHidden    bool `gorm:"default:false"`
+	IsPermanent bool `gorm:"default:false"`
 	CreatorID   *uint
 	Creator     *User `gorm:"foreignKey:CreatorID;constraint:OnDelete:SET NULL;"`
 }

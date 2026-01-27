@@ -77,11 +77,15 @@ func Migrate() error {
 			Name:        "general",
 			Description: "Default chat room",
 			IsPrivate:   false,
+			IsPermanent: true,
 		}
 		if err := DB.Create(&defaultRoom).Error; err != nil {
 			return fmt.Errorf("failed to create default room: %w", err)
 		}
 		log.Println("Created default 'general' room")
+	} else {
+		// Ensure general room is permanent
+		DB.Model(&models.Room{}).Where("name = ?", "general").Update("is_permanent", true)
 	}
 
 	log.Println("Database migrations completed")

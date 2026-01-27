@@ -61,6 +61,41 @@ func init() {
 	})
 
 	registerCommand(&Command{
+		Name:        "leave",
+		Aliases:     []string{"l", "exit"},
+		Description: "Leave current room and join general",
+		Usage:       "/leave",
+		Handler:     handleLeave,
+	})
+
+	registerCommand(&Command{
+		Name:        "permanent",
+		Aliases:     []string{"perm", "makepermanent"},
+		Description: "Make a room permanent (admin only)",
+		Usage:       "/permanent <room_name>",
+		Handler:     handlePermanent,
+		AdminOnly:   true,
+	})
+
+	registerCommand(&Command{
+		Name:        "hide",
+		Aliases:     []string{"hideroom"},
+		Description: "Hide a room from non-admins (admin only)",
+		Usage:       "/hide <room_name>",
+		Handler:     handleHide,
+		AdminOnly:   true,
+	})
+
+	registerCommand(&Command{
+		Name:        "unhide",
+		Aliases:     []string{"unhideroom", "show"},
+		Description: "Unhide a room (admin only)",
+		Usage:       "/unhide <room_name>",
+		Handler:     handleUnhide,
+		AdminOnly:   true,
+	})
+
+	registerCommand(&Command{
 		Name:        "msg",
 		Aliases:     []string{"pm", "whisper", "w"},
 		Description: "Send a private message",
@@ -260,51 +295,135 @@ func handleHelp(user *models.User, args []string) (string, error) {
 		"addkey": "Add SSH key to account (use 'pp' to preserve password, 'mr' for machine-readable output)",
 		"qr":     "Generate and send a QR code to the chat",
 	}
+	
+	// Command categories
+	type CommandTopic struct {
+		Name     string
+		Commands []string
+	}
+	
+	topics := []CommandTopic{
+		{
+			Name:     "rooms",
+			Commands: []string{"rooms", "join", "create", "leave", "users"},
+		},
+		{
+			Name:     "messaging",
+			Commands: []string{"msg", "mentions", "news", "me"},
+		},
+		{
+			Name:     "user",
+			Commands: []string{"nick", "status", "bell"},
+		},
+		{
+			Name:     "moderation",
+			Commands: []string{"ban", "kick", "mute", "unban", "unmute", "report", "reports", "markreports"},
+		},
+		{
+			Name:     "admin",
+			Commands: []string{"promote", "demote", "admins", "deleteuser", "permanent", "hide", "unhide"},
+		},
+	}
 
 	if len(args) > 0 {
-		cmdName := args[0]
-
-		// Check if it's a special command
-		if desc, ok := specialCommands[cmdName]; ok {
-			usage := fmt.Sprintf("/%s", cmdName)
-			if cmdName == "addkey" {
-				usage = "/addkey [pp] [mr]"
-			} else if cmdName == "qr" {
-				usage = "/qr <text or URL>"
+		topicOrCmd := strings.ToLower(args[0])
+		
+		// Check if it's a topic
+		for _, topic := range topics {
+			if topic.Name == topicOrCmd {
+				var result strings.Builder
+				topicTitle := strings.ToUpper(string(topic.Name[0])) + topic.Name[1:]
+				result.WriteString(fmt.Sprintf("=== %s Commands ===\n", topicTitle))
+				
+				for _, cmdName := range topic.Commands {
+					cmd := GetCommand(cmdName)
+					if cmd != nil {
+						if cmd.AdminOnly && !user.IsAdmin {
+							continue
+						}
+						result.WriteString(fmt.Sprintf("  /%s - %s\n", cmd.Name, cmd.Description))
+					}
+				}
+				
+				result.WriteString("\nType /help <command> for more information")
+				return result.String(), nil
 			}
-			return fmt.Sprintf("%s: %s\nUsage: %s", cmdName, desc, usage), nil
 		}
 
-		cmd := GetCommand(cmdName)
+		// Check if it's a special command
+		if desc, ok := specialCommands[topicOrCmd]; ok {
+			usage := fmt.Sprintf("/%s", topicOrCmd)
+			if topicOrCmd == "addkey" {
+				usage = "/addkey [pp] [mr]"
+			} else if topicOrCmd == "qr" {
+				usage = "/qr <text or URL>"
+			}
+			return fmt.Sprintf("%s: %s\nUsage: %s", topicOrCmd, desc, usage), nil
+		}
+
+		// Check if it's a regular command
+		cmd := GetCommand(topicOrCmd)
 		if cmd == nil {
-			return "", fmt.Errorf("command not found: %s", cmdName)
+			return "", fmt.Errorf("command or topic not found: %s", topicOrCmd)
 		}
 		aliases := strings.Join(cmd.Aliases, ", ")
 		return fmt.Sprintf("%s: %s\nUsage: %s\nAliases: %s", cmd.Name, cmd.Description, cmd.Usage, aliases), nil
 	}
 
+	// Show all commands organized by topic
 	var result strings.Builder
-	result.WriteString("Available commands:\n")
-
-	// Add special commands first
+	result.WriteString("Available Commands by Topic:\n\n")
+	
+	for _, topic := range topics {
+		// Skip admin topic if user is not admin
+		hasVisibleCommands := false
+		for _, cmdName := range topic.Commands {
+			cmd := GetCommand(cmdName)
+			if cmd != nil && (!cmd.AdminOnly || user.IsAdmin) {
+				hasVisibleCommands = true
+				break
+			}
+		}
+		
+		if !hasVisibleCommands {
+			continue
+		}
+		
+		topicTitle := strings.ToUpper(string(topic.Name[0])) + topic.Name[1:]
+		result.WriteString(fmt.Sprintf("=== %s ===\n", topicTitle))
+		for _, cmdName := range topic.Commands {
+			cmd := GetCommand(cmdName)
+			if cmd != nil {
+				if cmd.AdminOnly && !user.IsAdmin {
+					continue
+				}
+				result.WriteString(fmt.Sprintf("  /%s - %s\n", cmd.Name, cmd.Description))
+			}
+		}
+		result.WriteString("\n")
+	}
+	
+	// Add special commands
+	result.WriteString("=== Special ===\n")
 	for name, desc := range specialCommands {
 		result.WriteString(fmt.Sprintf("  /%s - %s\n", name, desc))
 	}
-
-	// Add regular commands
-	for _, cmd := range GetAllCommands() {
-		if cmd.AdminOnly && !user.IsAdmin {
-			continue
-		}
-		result.WriteString(fmt.Sprintf("  /%s - %s\n", cmd.Name, cmd.Description))
-	}
-	result.WriteString("\nType /help <command> for more information")
+	
+	result.WriteString("\nType /help <topic> to see commands in a topic (e.g., /help rooms)")
+	result.WriteString("\nType /help <command> for detailed information")
 	return result.String(), nil
 }
 
 func handleRooms(user *models.User, args []string) (string, error) {
 	var rooms []models.Room
-	if err := database.DB.Find(&rooms).Error; err != nil {
+	
+	// Filter hidden rooms for non-admins
+	query := database.DB
+	if !user.IsAdmin {
+		query = query.Where("is_hidden = ?", false)
+	}
+	
+	if err := query.Find(&rooms).Error; err != nil {
 		return "", fmt.Errorf("failed to fetch rooms: %w", err)
 	}
 
@@ -315,7 +434,17 @@ func handleRooms(user *models.User, args []string) (string, error) {
 		if user.CurrentRoomID != nil && *user.CurrentRoomID == room.ID {
 			marker = "*"
 		}
-		result.WriteString(fmt.Sprintf("%s %s - %s\n", marker, room.Name, room.Description))
+		
+		// Add indicators for room properties
+		indicators := ""
+		if room.IsHidden {
+			indicators += " [Hidden]"
+		}
+		if room.IsPermanent {
+			indicators += " [Permanent]"
+		}
+		
+		result.WriteString(fmt.Sprintf("%s %s - %s%s\n", marker, room.Name, room.Description, indicators))
 	}
 	return result.String(), nil
 }
@@ -328,6 +457,11 @@ func handleJoin(user *models.User, args []string) (string, error) {
 	roomName := args[0]
 	var room models.Room
 	if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
+		return "", fmt.Errorf("room not found: %s", roomName)
+	}
+	
+	// Check if room is hidden and user is not admin
+	if room.IsHidden && !user.IsAdmin {
 		return "", fmt.Errorf("room not found: %s", roomName)
 	}
 
@@ -362,6 +496,102 @@ func handleCreate(user *models.User, args []string) (string, error) {
 	}
 
 	return fmt.Sprintf("Created room: %s", roomName), nil
+}
+
+func handleLeave(user *models.User, args []string) (string, error) {
+	if user.CurrentRoomID == nil {
+		return "", fmt.Errorf("you are not in a room")
+	}
+	
+	// Join the general room
+	var generalRoom models.Room
+	if err := database.DB.Where("name = ?", "general").First(&generalRoom).Error; err != nil {
+		return "", fmt.Errorf("general room not found")
+	}
+	
+	// Check if already in general
+	if *user.CurrentRoomID == generalRoom.ID {
+		return "You are already in the general room", nil
+	}
+	
+	user.CurrentRoomID = &generalRoom.ID
+	if err := database.DB.Save(user).Error; err != nil {
+		return "", fmt.Errorf("failed to leave room: %w", err)
+	}
+	
+	return "Left room and joined general", nil
+}
+
+func handlePermanent(user *models.User, args []string) (string, error) {
+	if len(args) < 1 {
+		return "", fmt.Errorf("usage: /permanent <room_name>")
+	}
+	
+	roomName := args[0]
+	var room models.Room
+	if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
+		return "", fmt.Errorf("room not found: %s", roomName)
+	}
+	
+	if room.IsPermanent {
+		return "", fmt.Errorf("room %s is already permanent", roomName)
+	}
+	
+	room.IsPermanent = true
+	if err := database.DB.Save(&room).Error; err != nil {
+		return "", fmt.Errorf("failed to make room permanent: %w", err)
+	}
+	
+	logAction(user, "permanent", fmt.Sprintf("Made room %s permanent", roomName))
+	return fmt.Sprintf("Room %s is now permanent", roomName), nil
+}
+
+func handleHide(user *models.User, args []string) (string, error) {
+	if len(args) < 1 {
+		return "", fmt.Errorf("usage: /hide <room_name>")
+	}
+	
+	roomName := args[0]
+	var room models.Room
+	if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
+		return "", fmt.Errorf("room not found: %s", roomName)
+	}
+	
+	if room.IsHidden {
+		return "", fmt.Errorf("room %s is already hidden", roomName)
+	}
+	
+	room.IsHidden = true
+	if err := database.DB.Save(&room).Error; err != nil {
+		return "", fmt.Errorf("failed to hide room: %w", err)
+	}
+	
+	logAction(user, "hide", fmt.Sprintf("Hid room %s", roomName))
+	return fmt.Sprintf("Room %s is now hidden", roomName), nil
+}
+
+func handleUnhide(user *models.User, args []string) (string, error) {
+	if len(args) < 1 {
+		return "", fmt.Errorf("usage: /unhide <room_name>")
+	}
+	
+	roomName := args[0]
+	var room models.Room
+	if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
+		return "", fmt.Errorf("room not found: %s", roomName)
+	}
+	
+	if !room.IsHidden {
+		return "", fmt.Errorf("room %s is not hidden", roomName)
+	}
+	
+	room.IsHidden = false
+	if err := database.DB.Save(&room).Error; err != nil {
+		return "", fmt.Errorf("failed to unhide room: %w", err)
+	}
+	
+	logAction(user, "unhide", fmt.Sprintf("Unhid room %s", roomName))
+	return fmt.Sprintf("Room %s is now visible", roomName), nil
 }
 
 func handlePrivateMessage(user *models.User, args []string) (string, error) {
