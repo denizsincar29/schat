@@ -379,6 +379,9 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 		user.CurrentRoomID = nil
 		database.DB.Save(user)
 
+		// Cleanup empty rooms
+		cleanupEmptyRooms()
+
 		logAction(user, "disconnect", "User disconnected")
 	}()
 
@@ -463,11 +466,21 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 			for _, u := range users {
 				completions = append(completions, "@"+u.Username)
 			}
-		} else if len(words) > 0 && (words[0] == "/join" || words[0] == "/j") && len(words) <= 2 {
-			// Room name completion after /join command
+		} else if len(words) > 0 && (words[0] == "/join" || words[0] == "/j" || 
+			words[0] == "/permanent" || words[0] == "/perm" || words[0] == "/makepermanent" ||
+			words[0] == "/hide" || words[0] == "/hideroom" ||
+			words[0] == "/unhide" || words[0] == "/unhideroom" || words[0] == "/show") && len(words) <= 2 {
+			// Room name completion after room-related commands
 			roomPrefix := strings.ToLower(wordToComplete)
 			var rooms []models.Room
-			database.DB.Find(&rooms)
+			
+			// Filter hidden rooms for non-admins on /join
+			query := database.DB
+			if !user.IsAdmin && (words[0] == "/join" || words[0] == "/j") {
+				query = query.Where("is_hidden = ?", false)
+			}
+			
+			query.Find(&rooms)
 			for _, r := range rooms {
 				if strings.HasPrefix(strings.ToLower(r.Name), roomPrefix) {
 					completions = append(completions, r.Name)
@@ -955,6 +968,31 @@ func broadcastToRoom(roomID uint, message string, excludeUserID uint) {
 				client.Terminal.Write([]byte("\a"))
 			}
 			client.Mutex.Unlock()
+		}
+	}
+}
+
+// cleanupEmptyRooms removes non-permanent rooms that have no users
+func cleanupEmptyRooms() {
+	// Get all rooms that are not permanent and not the general room
+	var rooms []models.Room
+	if err := database.DB.Where("is_permanent = ? AND name != ?", false, "general").Find(&rooms).Error; err != nil {
+		log.Printf("Error fetching rooms for cleanup: %v", err)
+		return
+	}
+
+	for _, room := range rooms {
+		// Count users in this room
+		var userCount int64
+		database.DB.Model(&models.User{}).Where("current_room_id = ?", room.ID).Count(&userCount)
+		
+		if userCount == 0 {
+			// No users in this room, delete it
+			if err := database.DB.Delete(&room).Error; err != nil {
+				log.Printf("Error deleting empty room %s: %v", room.Name, err)
+			} else {
+				log.Printf("Cleaned up empty room: %s", room.Name)
+			}
 		}
 	}
 }
