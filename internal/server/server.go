@@ -474,9 +474,15 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 		} else if len(words) > 0 && (words[0] == "/join" || words[0] == "/j" || 
 			words[0] == "/permanent" || words[0] == "/perm" || words[0] == "/makepermanent" ||
 			words[0] == "/hide" || words[0] == "/hideroom" ||
-			words[0] == "/unhide" || words[0] == "/unhideroom" || words[0] == "/show") && len(words) <= 2 {
+			words[0] == "/unhide" || words[0] == "/unhideroom" || words[0] == "/show" ||
+			words[0] == "/move" || words[0] == "/moveuser" ||
+			words[0] == "/setpassword" || words[0] == "/roompassword" || words[0] == "/setpass") && len(words) <= 2 {
 			// Room name completion after room-related commands
 			roomPrefix := strings.ToLower(wordToComplete)
+			// Strip # prefix if present for matching
+			if strings.HasPrefix(roomPrefix, "#") {
+				roomPrefix = roomPrefix[1:]
+			}
 			var rooms []models.Room
 			
 			// Filter hidden rooms for non-admins on /join
@@ -488,7 +494,8 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 			query.Find(&rooms)
 			for _, r := range rooms {
 				if strings.HasPrefix(strings.ToLower(r.Name), roomPrefix) {
-					completions = append(completions, r.Name)
+					// Add # prefix to room names in autocomplete
+					completions = append(completions, "#"+r.Name)
 				}
 			}
 		} else if len(words) > 0 {

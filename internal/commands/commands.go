@@ -49,7 +49,7 @@ func init() {
 		Name:        "join",
 		Aliases:     []string{"j", "room"},
 		Description: "Join a room",
-		Usage:       "/join <room_name>",
+		Usage:       "/join #<room_name> [password]",
 		Handler:     handleJoin,
 	})
 
@@ -57,7 +57,7 @@ func init() {
 		Name:        "create",
 		Aliases:     []string{"cr", "createroom"},
 		Description: "Create a new room",
-		Usage:       "/create <room_name> [description]",
+		Usage:       "/create #<room_name> [--password <password>] [description]",
 		Handler:     handleCreate,
 	})
 
@@ -73,7 +73,7 @@ func init() {
 		Name:        "permanent",
 		Aliases:     []string{"perm", "makepermanent"},
 		Description: "Make a room permanent (admin only)",
-		Usage:       "/permanent <room_name>",
+		Usage:       "/permanent #<room_name>",
 		Handler:     handlePermanent,
 		AdminOnly:   true,
 	})
@@ -82,7 +82,7 @@ func init() {
 		Name:        "hide",
 		Aliases:     []string{"hideroom"},
 		Description: "Hide a room from non-admins (admin only)",
-		Usage:       "/hide <room_name>",
+		Usage:       "/hide #<room_name>",
 		Handler:     handleHide,
 		AdminOnly:   true,
 	})
@@ -91,7 +91,7 @@ func init() {
 		Name:        "unhide",
 		Aliases:     []string{"unhideroom", "show"},
 		Description: "Unhide a room (admin only)",
-		Usage:       "/unhide <room_name>",
+		Usage:       "/unhide #<room_name>",
 		Handler:     handleUnhide,
 		AdminOnly:   true,
 	})
@@ -270,7 +270,7 @@ func init() {
 		Name:        "move",
 		Aliases:     []string{"moveuser"},
 		Description: "Move a user to a different room (admin only)",
-		Usage:       "/move <username> <room_name>",
+		Usage:       "/move @<username> #<room_name>",
 		Handler:     handleMove,
 		AdminOnly:   true,
 	})
@@ -288,7 +288,7 @@ func init() {
 		Name:        "viewuser",
 		Aliases:     []string{"userinfo"},
 		Description: "View detailed user information (admin only)",
-		Usage:       "/viewuser <username>",
+		Usage:       "/viewuser @<username>",
 		Handler:     handleViewUser,
 		AdminOnly:   true,
 	})
@@ -297,7 +297,7 @@ func init() {
 		Name:        "setpassword",
 		Aliases:     []string{"roompassword", "setpass"},
 		Description: "Set or change room password (room creator or admin only)",
-		Usage:       "/setpassword <room_name> <password> (use empty string to remove)",
+		Usage:       "/setpassword #<room_name> <password> (use 'none' to remove)",
 		Handler:     handleSetPassword,
 	})
 }
@@ -311,6 +311,13 @@ func registerCommand(cmd *Command) {
 
 func GetCommand(name string) *Command {
 	return Commands[name]
+}
+
+// stripPrefixes removes @ prefix from usernames and # prefix from room names
+func stripPrefixes(name string) string {
+	name = strings.TrimPrefix(name, "@")
+	name = strings.TrimPrefix(name, "#")
+	return name
 }
 
 func GetAllCommands() []*Command {
@@ -485,18 +492,21 @@ func handleRooms(user *models.User, args []string) (string, error) {
 		if room.IsPermanent {
 			indicators += " [Permanent]"
 		}
+		if room.Password != "" {
+			indicators += " [Password-protected]"
+		}
 		
-		result.WriteString(fmt.Sprintf("%s %s - %s%s\n", marker, room.Name, room.Description, indicators))
+		result.WriteString(fmt.Sprintf("%s #%s - %s%s\n", marker, room.Name, room.Description, indicators))
 	}
 	return result.String(), nil
 }
 
 func handleJoin(user *models.User, args []string) (string, error) {
 	if len(args) < 1 {
-		return "", fmt.Errorf("usage: /join <room_name> [password]")
+		return "", fmt.Errorf("usage: /join #<room_name> [password]")
 	}
 
-	roomName := args[0]
+	roomName := stripPrefixes(args[0])
 	var room models.Room
 	if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
 		return "", fmt.Errorf("room not found: %s", roomName)
@@ -511,7 +521,7 @@ func handleJoin(user *models.User, args []string) (string, error) {
 	if room.Password != "" {
 		// Room is password-protected
 		if len(args) < 2 {
-			return "", fmt.Errorf("this room requires a password. Usage: /join <room_name> <password>")
+			return "", fmt.Errorf("this room requires a password. Usage: /join #<room_name> <password>")
 		}
 		password := args[1]
 		// Verify password
@@ -525,15 +535,15 @@ func handleJoin(user *models.User, args []string) (string, error) {
 		return "", fmt.Errorf("failed to join room: %w", err)
 	}
 
-	return fmt.Sprintf("Joined room: %s", room.Name), nil
+	return fmt.Sprintf("Joined room: #%s", room.Name), nil
 }
 
 func handleCreate(user *models.User, args []string) (string, error) {
 	if len(args) < 1 {
-		return "", fmt.Errorf("usage: /create <room_name> [--password <password>] [description]")
+		return "", fmt.Errorf("usage: /create #<room_name> [--password <password>] [description]")
 	}
 
-	roomName := args[0]
+	roomName := stripPrefixes(args[0])
 	
 	// Validate room name - check for reserved names
 	reservedRoomNames := []string{"general", "admin", "system", "all", "everyone", "here"}
@@ -594,9 +604,9 @@ func handleCreate(user *models.User, args []string) (string, error) {
 	}
 
 	if password != "" {
-		return fmt.Sprintf("Created password-protected room: %s", roomName), nil
+		return fmt.Sprintf("Created password-protected room: #%s", roomName), nil
 	}
-	return fmt.Sprintf("Created room: %s", roomName), nil
+	return fmt.Sprintf("Created room: #%s", roomName), nil
 }
 
 func handleLeave(user *models.User, args []string) (string, error) {
@@ -625,17 +635,17 @@ func handleLeave(user *models.User, args []string) (string, error) {
 
 func handlePermanent(user *models.User, args []string) (string, error) {
 	if len(args) < 1 {
-		return "", fmt.Errorf("usage: /permanent <room_name>")
+		return "", fmt.Errorf("usage: /permanent #<room_name>")
 	}
 	
-	roomName := args[0]
+	roomName := stripPrefixes(args[0])
 	var room models.Room
 	if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
 		return "", fmt.Errorf("room not found: %s", roomName)
 	}
 	
 	if room.IsPermanent {
-		return "", fmt.Errorf("room %s is already permanent", roomName)
+		return "", fmt.Errorf("room #%s is already permanent", roomName)
 	}
 	
 	room.IsPermanent = true
@@ -644,22 +654,22 @@ func handlePermanent(user *models.User, args []string) (string, error) {
 	}
 	
 	logAction(user, "permanent", fmt.Sprintf("Made room %s permanent", roomName))
-	return fmt.Sprintf("Room %s is now permanent", roomName), nil
+	return fmt.Sprintf("Room #%s is now permanent", roomName), nil
 }
 
 func handleHide(user *models.User, args []string) (string, error) {
 	if len(args) < 1 {
-		return "", fmt.Errorf("usage: /hide <room_name>")
+		return "", fmt.Errorf("usage: /hide #<room_name>")
 	}
 	
-	roomName := args[0]
+	roomName := stripPrefixes(args[0])
 	var room models.Room
 	if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
 		return "", fmt.Errorf("room not found: %s", roomName)
 	}
 	
 	if room.IsHidden {
-		return "", fmt.Errorf("room %s is already hidden", roomName)
+		return "", fmt.Errorf("room #%s is already hidden", roomName)
 	}
 	
 	room.IsHidden = true
@@ -668,22 +678,22 @@ func handleHide(user *models.User, args []string) (string, error) {
 	}
 	
 	logAction(user, "hide", fmt.Sprintf("Hid room %s", roomName))
-	return fmt.Sprintf("Room %s is now hidden", roomName), nil
+	return fmt.Sprintf("Room #%s is now hidden", roomName), nil
 }
 
 func handleUnhide(user *models.User, args []string) (string, error) {
 	if len(args) < 1 {
-		return "", fmt.Errorf("usage: /unhide <room_name>")
+		return "", fmt.Errorf("usage: /unhide #<room_name>")
 	}
 	
-	roomName := args[0]
+	roomName := stripPrefixes(args[0])
 	var room models.Room
 	if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
 		return "", fmt.Errorf("room not found: %s", roomName)
 	}
 	
 	if !room.IsHidden {
-		return "", fmt.Errorf("room %s is not hidden", roomName)
+		return "", fmt.Errorf("room #%s is not hidden", roomName)
 	}
 	
 	room.IsHidden = false
@@ -692,7 +702,7 @@ func handleUnhide(user *models.User, args []string) (string, error) {
 	}
 	
 	logAction(user, "unhide", fmt.Sprintf("Unhid room %s", roomName))
-	return fmt.Sprintf("Room %s is now visible", roomName), nil
+	return fmt.Sprintf("Room #%s is now visible", roomName), nil
 }
 
 func handlePrivateMessage(user *models.User, args []string) (string, error) {
@@ -1381,11 +1391,11 @@ func handleMarkReports(user *models.User, args []string) (string, error) {
 
 func handleMove(user *models.User, args []string) (string, error) {
 	if len(args) < 2 {
-		return "", fmt.Errorf("usage: /move <username> <room_name>")
+		return "", fmt.Errorf("usage: /move @<username> #<room_name>")
 	}
 
-	username := strings.TrimPrefix(args[0], "@")
-	roomName := args[1]
+	username := stripPrefixes(args[0])
+	roomName := stripPrefixes(args[1])
 
 	// Find the target user
 	var targetUser models.User
@@ -1405,7 +1415,7 @@ func handleMove(user *models.User, args []string) (string, error) {
 		return "", fmt.Errorf("failed to move user: %w", err)
 	}
 
-	return fmt.Sprintf("Moved %s to room %s", username, roomName), nil
+	return fmt.Sprintf("Moved @%s to room #%s", username, roomName), nil
 }
 
 func handleListUsers(user *models.User, args []string) (string, error) {
@@ -1449,10 +1459,10 @@ func handleListUsers(user *models.User, args []string) (string, error) {
 
 func handleViewUser(user *models.User, args []string) (string, error) {
 	if len(args) < 1 {
-		return "", fmt.Errorf("usage: /viewuser <username>")
+		return "", fmt.Errorf("usage: /viewuser @<username>")
 	}
 
-	username := strings.TrimPrefix(args[0], "@")
+	username := stripPrefixes(args[0])
 
 	var targetUser models.User
 	if err := database.DB.Preload("CurrentRoom").Where("username = ?", username).First(&targetUser).Error; err != nil {
@@ -1486,7 +1496,7 @@ func handleViewUser(user *models.User, args []string) (string, error) {
 	result.WriteString(fmt.Sprintf("Bell Enabled: %v\n", targetUser.BellEnabled))
 	
 	if targetUser.CurrentRoom != nil {
-		result.WriteString(fmt.Sprintf("Current Room: %s\n", targetUser.CurrentRoom.Name))
+		result.WriteString(fmt.Sprintf("Current Room: #%s\n", targetUser.CurrentRoom.Name))
 	} else {
 		result.WriteString("Current Room: None\n")
 	}
@@ -1515,10 +1525,10 @@ func handleViewUser(user *models.User, args []string) (string, error) {
 
 func handleSetPassword(user *models.User, args []string) (string, error) {
 	if len(args) < 2 {
-		return "", fmt.Errorf("usage: /setpassword <room_name> <password> (use 'none' to remove)")
+		return "", fmt.Errorf("usage: /setpassword #<room_name> <password> (use 'none' to remove)")
 	}
 
-	roomName := args[0]
+	roomName := stripPrefixes(args[0])
 	password := args[1]
 
 	// Find the room
@@ -1538,7 +1548,7 @@ func handleSetPassword(user *models.User, args []string) (string, error) {
 		if err := database.DB.Save(&room).Error; err != nil {
 			return "", fmt.Errorf("failed to remove password: %w", err)
 		}
-		return fmt.Sprintf("Password removed from room: %s", roomName), nil
+		return fmt.Sprintf("Password removed from room: #%s", roomName), nil
 	}
 
 	// Hash the new password
@@ -1552,5 +1562,5 @@ func handleSetPassword(user *models.User, args []string) (string, error) {
 		return "", fmt.Errorf("failed to set password: %w", err)
 	}
 
-	return fmt.Sprintf("Password set for room: %s", roomName), nil
+	return fmt.Sprintf("Password set for room: #%s", roomName), nil
 }
