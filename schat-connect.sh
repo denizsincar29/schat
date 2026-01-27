@@ -221,9 +221,10 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     info "You will be prompted for your password"
     echo ""
     
-    # Create a temporary expect-like script using SSH and heredoc
-    # We'll use SSH with commands to automate the addkey process
-    TEMP_SCRIPT=$(mktemp)
+    # Create a temporary script with proper cleanup trap
+    TEMP_SCRIPT=$(mktemp /tmp/schat-addkey-XXXXXX.sh)
+    trap "rm -f '$TEMP_SCRIPT'" EXIT INT TERM
+    
     cat > "$TEMP_SCRIPT" << 'SCRIPT_EOF'
 #!/bin/bash
 set -e
@@ -232,6 +233,7 @@ set -e
 PUBLIC_KEY_CONTENT=$(cat)
 
 # Connect to SSH and send commands
+# Using printf to ensure proper line endings
 ssh -p "$1" -o PreferredAuthentications=keyboard-interactive,password "$2@$3" << EOF
 /addkey
 $PUBLIC_KEY_CONTENT
@@ -261,6 +263,5 @@ SCRIPT_EOF
         info "Then run: /addkey"
     fi
     
-    # Clean up temp script
-    rm -f "$TEMP_SCRIPT"
+    # Cleanup happens automatically via trap
 fi
