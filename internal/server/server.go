@@ -19,6 +19,7 @@ import (
 	"github.com/denizsincar29/schat/internal/commands"
 	"github.com/denizsincar29/schat/internal/database"
 	"github.com/denizsincar29/schat/internal/models"
+	qrcode "github.com/skip2/go-qrcode"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 	"gorm.io/gorm"
@@ -569,6 +570,12 @@ func handleCommand(client *Client, line string) {
 		return
 	}
 
+	// Special handling for /qr command to generate QR codes
+	if cmdName == "qr" {
+		handleQRCode(client, args)
+		return
+	}
+
 	cmd := commands.GetCommand(cmdName)
 	if cmd == nil {
 		fmt.Fprintf(client.Conn, "Unknown command: %s\n", cmdName)
@@ -612,13 +619,16 @@ func handleAddKey(client *Client, args []string) {
 
 	// Parse flags - only accept recognized flags
 	preservePassword := false
+	machineReadable := false
 	for _, arg := range args {
 		argLower := strings.ToLower(arg)
 		if argLower == "preserve-password" || argLower == "pp" || argLower == "keep-password" {
 			preservePassword = true
+		} else if argLower == "mr" || argLower == "machine-readable" {
+			machineReadable = true
 		} else {
 			fmt.Fprintf(client.Conn, "Unknown flag: %s\n", arg)
-			fmt.Fprintf(client.Conn, "Usage: /addkey [pp|preserve-password|keep-password]\n")
+			fmt.Fprintf(client.Conn, "Usage: /addkey [pp|preserve-password|keep-password] [mr|machine-readable]\n")
 			return
 		}
 	}
@@ -692,11 +702,17 @@ func handleAddKey(client *Client, args []string) {
 	}
 
 	logAction(client.User, "addkey", "Added SSH key to account")
-	fmt.Fprintf(client.Conn, "\nSSH key added successfully!\n")
-	if preservePassword {
-		fmt.Fprintf(client.Conn, "You can now login using either your password or SSH key.\n")
+	
+	// Output success message - machine-readable or human-readable
+	if machineReadable {
+		fmt.Fprintf(client.Conn, "\nSUCCESS: SSH_KEY_ADDED\n")
 	} else {
-		fmt.Fprintf(client.Conn, "Your password has been removed. You can now only login using your SSH key.\n")
+		fmt.Fprintf(client.Conn, "\nSSH key added successfully!\n")
+		if preservePassword {
+			fmt.Fprintf(client.Conn, "You can now login using either your password or SSH key.\n")
+		} else {
+			fmt.Fprintf(client.Conn, "Your password has been removed. You can now only login using your SSH key.\n")
+		}
 	}
 	
 	// Restore prompt
@@ -719,6 +735,100 @@ func isPrivateKeyMarker(line string) bool {
 		}
 	}
 	return false
+}
+
+// handleQRCode generates and sends a QR code to the chat
+func handleQRCode(client *Client, args []string) {
+	if len(args) == 0 {
+		fmt.Fprintf(client.Conn, "Usage: /qr <text or URL>\n")
+		return
+	}
+
+	// Join all arguments to support URLs and text with spaces
+	data := strings.Join(args, " ")
+	
+	// Check if user is in a room
+	if client.User.CurrentRoomID == nil {
+		fmt.Fprintf(client.Conn, "You are not in a room. Use /join <room> to join one.\n")
+		return
+	}
+
+	// Check if user is muted
+	if client.User.IsMuted && client.User.MuteExpiresAt != nil && client.User.MuteExpiresAt.After(time.Now()) {
+		fmt.Fprintf(client.Conn, "You are muted until %s\n", client.User.MuteExpiresAt.Format("2006-01-02 15:04:05"))
+		return
+	}
+
+	// Generate QR code
+	qr, err := qrcode.New(data, qrcode.Medium)
+	if err != nil {
+		fmt.Fprintf(client.Conn, "Error generating QR code: %v\n", err)
+		return
+	}
+
+	// Convert QR code to string using Unicode blocks
+	qrString := qrCodeToUnicode(qr)
+	
+	// Get display name
+	displayName := client.User.Username
+	if client.User.Nickname != "" {
+		displayName = client.User.Nickname
+	}
+
+	// Save message to database (store the data URL, not the rendered QR code)
+	chatMsg := models.ChatMessage{
+		UserID:  client.User.ID,
+		RoomID:  client.User.CurrentRoomID,
+		Content: fmt.Sprintf("/qr %s", data),
+	}
+	database.DB.Create(&chatMsg)
+
+	// Create announcement message
+	announcement := fmt.Sprintf("%s sent a QR code:", displayName)
+	
+	// Broadcast announcement and QR code to room
+	fullMessage := announcement + "\n" + qrString
+	broadcastToRoom(*client.User.CurrentRoomID, fullMessage, client.User.ID)
+	
+	// Show to sender as well
+	fmt.Fprintf(client.Conn, "%s\n%s\n", announcement, qrString)
+
+	logAction(client.User, "qr", fmt.Sprintf("Sent QR code in room %d: %s", *client.User.CurrentRoomID, data))
+}
+
+// qrCodeToUnicode converts a QR code to Unicode block characters
+func qrCodeToUnicode(qr *qrcode.QRCode) string {
+	// Get the QR code bitmap
+	bitmap := qr.Bitmap()
+	
+	var result strings.Builder
+	result.WriteString("\n")
+	
+	// Process two rows at a time to use half-block characters
+	for y := 0; y < len(bitmap); y += 2 {
+		for x := 0; x < len(bitmap[y]); x++ {
+			topBlack := bitmap[y][x]
+			bottomBlack := false
+			if y+1 < len(bitmap) {
+				bottomBlack = bitmap[y+1][x]
+			}
+			
+			// Choose the appropriate Unicode block character
+			if topBlack && bottomBlack {
+				result.WriteString("█") // Full block
+			} else if topBlack && !bottomBlack {
+				result.WriteString("▀") // Upper half block
+			} else if !topBlack && bottomBlack {
+				result.WriteString("▄") // Lower half block
+			} else {
+				result.WriteString(" ") // Empty space
+			}
+		}
+		result.WriteString("\n")
+	}
+	result.WriteString("\n")
+	
+	return result.String()
 }
 
 func handleMessage(client *Client, message string) {
@@ -945,8 +1055,6 @@ func showChatHistory(channel ssh.Channel, user *models.User) {
 		return
 	}
 
-	fmt.Fprintf(channel, "--- Last %d messages ---\n", len(messages))
-	
 	// Reverse to show oldest first
 	for i := len(messages) - 1; i >= 0; i-- {
 		msg := messages[i]
@@ -968,7 +1076,7 @@ func showChatHistory(channel ssh.Channel, user *models.User) {
 			fmt.Fprintf(channel, "%s: %s\n", displayName, content)
 		}
 	}
-	fmt.Fprintf(channel, "--- End of history ---\n\n")
+	fmt.Fprintf(channel, "\n")
 }
 
 func showUnreadNotifications(channel ssh.Channel, user *models.User) {
