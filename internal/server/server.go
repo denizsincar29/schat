@@ -408,13 +408,6 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 	fmt.Fprintf(channel, "Type /help for available commands.\n")
 	fmt.Fprintf(channel, "\n")
 
-	// Create client for offline notifications
-	client := &Client{
-		User:     user,
-		Conn:     channel,
-		Terminal: terminal,
-	}
-
 	// Deliver offline notifications
 	deliverOfflineNotifications(client)
 
@@ -499,38 +492,55 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 				}
 			}
 		} else if len(words) > 0 {
-			// Check if command needs username completion
-			cmdName := strings.ToLower(words[0])
-			if strings.HasPrefix(cmdName, "/") {
-				cmdName = cmdName[1:]
-			}
-			cmd := commands.GetCommand(cmdName)
-			if cmd != nil {
-				// Commands that take username as argument - require @ prefix
-				usernameCommands := map[string]bool{
-					"msg": true, "pm": true, "whisper": true, "w": true,
-					"ban": true, "b": true, "kick": true, "k": true,
-					"mute": true, "silence": true, "unban": true, "ub": true,
-					"unmute": true, "um": true, "promote": true, "makeadmin": true,
-					"demote": true, "removeadmin": true, "deleteuser": true,
-					"deluser": true, "removeuser": true, "report": true, "reportuser": true,
-				}
-				if usernameCommands[cmdName] {
-					// Ensure @ prefix for username completion
-					userPrefix := wordToComplete
-					if !strings.HasPrefix(userPrefix, "@") {
-						return "", 0, false
+			// Check if we're completing a help topic
+			if (words[0] == "/help" || words[0] == "/h") && len(words) <= 2 {
+				topicPrefix := strings.ToLower(wordToComplete)
+				topics := []string{"rooms", "messaging", "user", "moderation", "admin"}
+				for _, topic := range topics {
+					if strings.HasPrefix(topic, topicPrefix) {
+						completions = append(completions, topic)
 					}
-					userPrefix = userPrefix[1:]
+				}
+				// Also add all command names for help
+				for cmdName := range commands.Commands {
+					if strings.HasPrefix(cmdName, topicPrefix) {
+						completions = append(completions, cmdName)
+					}
+				}
+			} else {
+				// Check if command needs username completion
+				cmdName := strings.ToLower(words[0])
+				if strings.HasPrefix(cmdName, "/") {
+					cmdName = cmdName[1:]
+				}
+				cmd := commands.GetCommand(cmdName)
+				if cmd != nil {
+					// Commands that take username as argument - require @ prefix
+					usernameCommands := map[string]bool{
+						"msg": true, "pm": true, "whisper": true, "w": true,
+						"ban": true, "b": true, "kick": true, "k": true,
+						"mute": true, "silence": true, "unban": true, "ub": true,
+						"unmute": true, "um": true, "promote": true, "makeadmin": true,
+						"demote": true, "removeadmin": true, "deleteuser": true,
+						"deluser": true, "removeuser": true, "report": true, "reportuser": true,
+					}
+					if usernameCommands[cmdName] {
+						// Ensure @ prefix for username completion
+						userPrefix := wordToComplete
+						if !strings.HasPrefix(userPrefix, "@") {
+							return "", 0, false
+						}
+						userPrefix = userPrefix[1:]
 
-					// Add "admin" as a special completion option
-					completions = append(completions, "@admin")
+						// Add "admin" as a special completion option
+						completions = append(completions, "@admin")
 
-					var users []models.User
-					// Use database filtering for efficiency
-					database.DB.Where("username LIKE ?", userPrefix+"%").Limit(10).Find(&users)
-					for _, u := range users {
-						completions = append(completions, "@"+u.Username)
+						var users []models.User
+						// Use database filtering for efficiency
+						database.DB.Where("username LIKE ?", userPrefix+"%").Limit(10).Find(&users)
+						for _, u := range users {
+							completions = append(completions, "@"+u.Username)
+						}
 					}
 				}
 			}
@@ -620,6 +630,17 @@ func handleCommand(client *Client, line string) {
 		return
 	}
 
+	// Check if user is asking for help
+	if len(args) > 0 && (args[0] == "?" || args[0] == "help" || args[0] == "--help") {
+		fmt.Fprintf(client.Conn, "Command: %s\n", cmd.Name)
+		if len(cmd.Aliases) > 0 {
+			fmt.Fprintf(client.Conn, "Aliases: %s\n", strings.Join(cmd.Aliases, ", "))
+		}
+		fmt.Fprintf(client.Conn, "Description: %s\n", cmd.Description)
+		fmt.Fprintf(client.Conn, "Usage: %s\n", cmd.Usage)
+		return
+	}
+
 	// Store previous room for movement tracking
 	var previousRoomID *uint
 	var previousRoom *models.Room
@@ -689,7 +710,7 @@ func handleCommand(client *Client, line string) {
 					// Notify previous room creator about user leaving
 					if previousRoom != nil && previousRoom.CreatorID != nil && 
 						*previousRoom.CreatorID != client.User.ID &&
-						(client.User.CurrentRoomID == nil || *previousRoom.ID != *client.User.CurrentRoomID) {
+						(client.User.CurrentRoomID == nil || previousRoom.ID != *client.User.CurrentRoomID) {
 						sendNotificationToUser(*previousRoom.CreatorID, "user_left_room",
 							fmt.Sprintf("%s left your room %s and went to %s", 
 								client.User.Username, previousRoom.Name, newRoom.Name),

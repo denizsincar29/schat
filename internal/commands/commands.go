@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/denizsincar29/schat/internal/auth"
 	"github.com/denizsincar29/schat/internal/database"
 	"github.com/denizsincar29/schat/internal/models"
 )
@@ -291,6 +292,14 @@ func init() {
 		Handler:     handleViewUser,
 		AdminOnly:   true,
 	})
+
+	registerCommand(&Command{
+		Name:        "setpassword",
+		Aliases:     []string{"roompassword", "setpass"},
+		Description: "Set or change room password (room creator or admin only)",
+		Usage:       "/setpassword <room_name> <password> (use empty string to remove)",
+		Handler:     handleSetPassword,
+	})
 }
 
 func registerCommand(cmd *Command) {
@@ -484,7 +493,7 @@ func handleRooms(user *models.User, args []string) (string, error) {
 
 func handleJoin(user *models.User, args []string) (string, error) {
 	if len(args) < 1 {
-		return "", fmt.Errorf("usage: /join <room_name>")
+		return "", fmt.Errorf("usage: /join <room_name> [password]")
 	}
 
 	roomName := args[0]
@@ -498,6 +507,19 @@ func handleJoin(user *models.User, args []string) (string, error) {
 		return "", fmt.Errorf("room not found: %s", roomName)
 	}
 
+	// Check if room has a password
+	if room.Password != "" {
+		// Room is password-protected
+		if len(args) < 2 {
+			return "", fmt.Errorf("this room requires a password. Usage: /join <room_name> <password>")
+		}
+		password := args[1]
+		// Verify password
+		if !auth.VerifyPassword(password, room.Password) {
+			return "", fmt.Errorf("incorrect password for room %s", roomName)
+		}
+	}
+
 	user.CurrentRoomID = &room.ID
 	if err := database.DB.Save(user).Error; err != nil {
 		return "", fmt.Errorf("failed to join room: %w", err)
@@ -508,7 +530,7 @@ func handleJoin(user *models.User, args []string) (string, error) {
 
 func handleCreate(user *models.User, args []string) (string, error) {
 	if len(args) < 1 {
-		return "", fmt.Errorf("usage: /create <room_name> [description]")
+		return "", fmt.Errorf("usage: /create <room_name> [--password <password>] [description]")
 	}
 
 	roomName := args[0]
@@ -532,10 +554,24 @@ func handleCreate(user *models.User, args []string) (string, error) {
 		return "", fmt.Errorf("room name must be at most 32 characters long")
 	}
 
-	description := ""
-	if len(args) > 1 {
-		description = strings.Join(args[1:], " ")
+	// Parse arguments for password and description
+	var password string
+	var descriptionParts []string
+	i := 1
+	for i < len(args) {
+		if args[i] == "--password" || args[i] == "-p" {
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("--password flag requires a password argument")
+			}
+			password = args[i+1]
+			i += 2
+		} else {
+			descriptionParts = append(descriptionParts, args[i])
+			i++
+		}
 	}
+	
+	description := strings.Join(descriptionParts, " ")
 
 	creatorID := user.ID
 	room := models.Room{
@@ -544,10 +580,22 @@ func handleCreate(user *models.User, args []string) (string, error) {
 		CreatorID:   &creatorID,
 	}
 
+	// Hash password if provided
+	if password != "" {
+		hashedPassword, err := auth.HashPassword(password)
+		if err != nil {
+			return "", fmt.Errorf("failed to hash password: %w", err)
+		}
+		room.Password = hashedPassword
+	}
+
 	if err := database.DB.Create(&room).Error; err != nil {
 		return "", fmt.Errorf("failed to create room: %w", err)
 	}
 
+	if password != "" {
+		return fmt.Sprintf("Created password-protected room: %s", roomName), nil
+	}
 	return fmt.Sprintf("Created room: %s", roomName), nil
 }
 
@@ -1463,4 +1511,46 @@ func handleViewUser(user *models.User, args []string) (string, error) {
 	result.WriteString(fmt.Sprintf("Has SSH Key: %s\n", hasSSHKey))
 
 	return result.String(), nil
+}
+
+func handleSetPassword(user *models.User, args []string) (string, error) {
+	if len(args) < 2 {
+		return "", fmt.Errorf("usage: /setpassword <room_name> <password> (use 'none' to remove)")
+	}
+
+	roomName := args[0]
+	password := args[1]
+
+	// Find the room
+	var room models.Room
+	if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
+		return "", fmt.Errorf("room not found: %s", roomName)
+	}
+
+	// Check if user is the creator or an admin
+	if room.CreatorID == nil || (*room.CreatorID != user.ID && !user.IsAdmin) {
+		return "", fmt.Errorf("only the room creator or admins can set the password")
+	}
+
+	// Handle password removal
+	if password == "none" || password == "" {
+		room.Password = ""
+		if err := database.DB.Save(&room).Error; err != nil {
+			return "", fmt.Errorf("failed to remove password: %w", err)
+		}
+		return fmt.Sprintf("Password removed from room: %s", roomName), nil
+	}
+
+	// Hash the new password
+	hashedPassword, err := auth.HashPassword(password)
+	if err != nil {
+		return "", fmt.Errorf("failed to hash password: %w", err)
+	}
+
+	room.Password = hashedPassword
+	if err := database.DB.Save(&room).Error; err != nil {
+		return "", fmt.Errorf("failed to set password: %w", err)
+	}
+
+	return fmt.Sprintf("Password set for room: %s", roomName), nil
 }
