@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # schat-connect.sh - Easy SSH key setup and connection script for schat
-# Usage: ./schat-connect.sh username@hostname [port]
+# Usage: ./schat-connect.sh [username@hostname] [port]
+#        ./schat-connect.sh (interactive mode)
 
 set -e
 
@@ -16,27 +17,50 @@ error() { echo -e "${RED}Error: $1${NC}" >&2; }
 success() { echo -e "${GREEN}✓ $1${NC}"; }
 info() { echo -e "${YELLOW}→ $1${NC}"; }
 
-# Check arguments
-if [ $# -lt 1 ]; then
-    echo "Usage: $0 username@hostname [port]"
+# Default values
+DEFAULT_HOSTNAME="denizsincar.ru"
+DEFAULT_PORT="2222"
+
+# Check if running in interactive mode
+if [ $# -eq 0 ]; then
+    # Interactive mode
+    info "Interactive setup mode"
     echo ""
-    echo "Example: $0 myuser@chat.example.com"
-    echo "         $0 myuser@localhost 2222"
-    exit 1
+    
+    # Ask for hostname
+    read -p "Enter hostname [$DEFAULT_HOSTNAME]: " HOSTNAME
+    HOSTNAME="${HOSTNAME:-$DEFAULT_HOSTNAME}"
+    
+    # Ask for port
+    read -p "Enter port [$DEFAULT_PORT]: " PORT
+    PORT="${PORT:-$DEFAULT_PORT}"
+    
+    # Ask for username
+    read -p "Enter username: " USERNAME
+    if [ -z "$USERNAME" ]; then
+        error "Username cannot be empty"
+        exit 1
+    fi
+    
+    # Ask for custom name
+    read -p "Enter custom name for SSH config [schat-${HOSTNAME}]: " CUSTOM_NAME
+    CUSTOM_NAME="${CUSTOM_NAME:-schat-${HOSTNAME}}"
+else
+    # Command-line argument mode
+    USER_HOST="$1"
+    PORT="${2:-$DEFAULT_PORT}"
+    
+    # Extract username and hostname
+    if [[ ! "$USER_HOST" =~ ^([^@]+)@(.+)$ ]]; then
+        error "Invalid format. Use: username@hostname"
+        echo "Or run without arguments for interactive mode"
+        exit 1
+    fi
+    
+    USERNAME="${BASH_REMATCH[1]}"
+    HOSTNAME="${BASH_REMATCH[2]}"
+    CUSTOM_NAME="schat-${HOSTNAME}"
 fi
-
-# Parse arguments
-USER_HOST="$1"
-PORT="${2:-2222}"  # Default port is 2222
-
-# Extract username and hostname
-if [[ ! "$USER_HOST" =~ ^([^@]+)@(.+)$ ]]; then
-    error "Invalid format. Use: username@hostname"
-    exit 1
-fi
-
-USERNAME="${BASH_REMATCH[1]}"
-HOSTNAME="${BASH_REMATCH[2]}"
 
 info "Setting up SSH key for schat connection"
 echo "  Username: $USERNAME"
@@ -89,28 +113,76 @@ success "Public key ready"
 
 # Add/update SSH config
 SSH_CONFIG="$SSH_DIR/config"
-HOST_ENTRY="schat-${HOSTNAME}"
+HOST_ENTRY="$CUSTOM_NAME"
 
 info "Configuring SSH client..."
 
-# Check if entry already exists
-if [ -f "$SSH_CONFIG" ] && grep -q "Host $HOST_ENTRY" "$SSH_CONFIG"; then
-    info "SSH config entry already exists for $HOST_ENTRY"
-else
-    # Add new entry to SSH config
+# Check if entries already exist
+SETUP_EXISTS=false
+MAIN_EXISTS=false
+if [ -f "$SSH_CONFIG" ]; then
+    grep -q "Host ${HOST_ENTRY}-setup" "$SSH_CONFIG" && SETUP_EXISTS=true
+    grep -q "Host $HOST_ENTRY\$" "$SSH_CONFIG" && MAIN_EXISTS=true
+fi
+
+if [ "$SETUP_EXISTS" = true ] && [ "$MAIN_EXISTS" = true ]; then
+    info "SSH config entries already exist for $HOST_ENTRY"
+elif [ "$SETUP_EXISTS" = true ] || [ "$MAIN_EXISTS" = true ]; then
+    info "WARNING: Incomplete SSH config detected. Removing old entries and recreating..."
+    # Remove old entries
+    if [ -f "$SSH_CONFIG" ]; then
+        # Create a backup
+        cp "$SSH_CONFIG" "${SSH_CONFIG}.backup"
+        # Remove both entries if they exist
+        sed -i "/^# schat connection.*$/,/^$/{ /Host ${HOST_ENTRY}/,/^$/d; }" "$SSH_CONFIG"
+        sed -i "/^Host ${HOST_ENTRY}-setup$/,/^$/d" "$SSH_CONFIG"
+        sed -i "/^Host ${HOST_ENTRY}$/,/^$/d" "$SSH_CONFIG"
+    fi
+    # Add new entries
     cat >> "$SSH_CONFIG" << EOF
 
-# schat connection
+# schat connection (initial setup - use password first to add key)
+Host ${HOST_ENTRY}-setup
+    HostName $HOSTNAME
+    Port $PORT
+    User $USERNAME
+    PreferredAuthentications keyboard-interactive,password
+    StrictHostKeyChecking accept-new
+
+# schat connection (after key is added - use key auth)
 Host $HOST_ENTRY
     HostName $HOSTNAME
     Port $PORT
     User $USERNAME
     IdentityFile $KEY_PATH
-    PreferredAuthentications publickey,keyboard-interactive
+    PreferredAuthentications publickey
     StrictHostKeyChecking accept-new
 
 EOF
-    success "Added SSH config entry: $HOST_ENTRY"
+    success "Recreated SSH config entries: ${HOST_ENTRY}-setup and $HOST_ENTRY"
+else
+    # Add new entry to SSH config
+    cat >> "$SSH_CONFIG" << EOF
+
+# schat connection (initial setup - use password first to add key)
+Host ${HOST_ENTRY}-setup
+    HostName $HOSTNAME
+    Port $PORT
+    User $USERNAME
+    PreferredAuthentications keyboard-interactive,password
+    StrictHostKeyChecking accept-new
+
+# schat connection (after key is added - use key auth)
+Host $HOST_ENTRY
+    HostName $HOSTNAME
+    Port $PORT
+    User $USERNAME
+    IdentityFile $KEY_PATH
+    PreferredAuthentications publickey
+    StrictHostKeyChecking accept-new
+
+EOF
+    success "Added SSH config entries: ${HOST_ENTRY}-setup and $HOST_ENTRY"
 fi
 
 # Ensure correct permissions
@@ -120,31 +192,76 @@ echo ""
 info "Setup complete! Your SSH key is ready."
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "IMPORTANT: You need to add this key to your schat account"
+echo "NEXT STEPS: Add your key to your schat account"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "1. First, login with your password:"
-echo "   ssh -p $PORT $USER_HOST"
+echo "STEP 1: Connect with your password using:"
+echo "   ssh ${HOST_ENTRY}-setup"
 echo ""
-echo "2. Then run the /addkey command and paste this public key:"
+echo "STEP 2: Once connected, run the /addkey command and paste this public key:"
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 cat "$PUB_KEY_PATH"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "3. Type 'END' on a new line to finish"
+echo "STEP 3: Type 'END' on a new line to finish adding the key"
 echo ""
-echo "After adding the key, you can connect using:"
+echo "STEP 4: After adding the key, reconnect using:"
 echo "   ssh $HOST_ENTRY"
 echo ""
-echo "Or directly with:"
-echo "   ssh -p $PORT -i $KEY_PATH $USER_HOST"
+echo "   (This will use your SSH key for authentication)"
 echo ""
 
-# Ask if user wants to connect now
-read -p "Would you like to connect now with password authentication? (y/n) " -n 1 -r
+# Ask if user wants to connect now and add key automatically
+read -p "Would you like to automatically add the key now? (y/n) " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    info "Connecting to schat..."
-    ssh -p "$PORT" -o PreferredAuthentications=keyboard-interactive "$USER_HOST"
+    info "Connecting to schat and automatically adding key..."
+    echo ""
+    info "You will be prompted for your password"
+    echo ""
+    
+    # Create a temporary script with proper cleanup trap
+    TEMP_SCRIPT=$(mktemp /tmp/schat-addkey-XXXXXX.sh)
+    trap "rm -f '$TEMP_SCRIPT'" EXIT INT TERM
+    
+    cat > "$TEMP_SCRIPT" << 'SCRIPT_EOF'
+#!/bin/bash
+set -e
+
+# Read public key from stdin
+PUBLIC_KEY_CONTENT=$(cat)
+
+# Connect to SSH and send commands
+# Using printf to ensure proper line endings
+ssh -p "$1" -o PreferredAuthentications=keyboard-interactive,password "$2@$3" << EOF
+/addkey
+$PUBLIC_KEY_CONTENT
+END
+EOF
+SCRIPT_EOF
+    
+    chmod +x "$TEMP_SCRIPT"
+    
+    # Execute the script with parameters
+    if cat "$PUB_KEY_PATH" | "$TEMP_SCRIPT" "$PORT" "$USERNAME" "$HOSTNAME"; then
+        success "SSH key added successfully!"
+        echo ""
+        info "You can now connect using: ssh $HOST_ENTRY"
+        echo ""
+        
+        # Ask if user wants to connect now with the key
+        read -p "Would you like to connect now using your SSH key? (y/n) " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            info "Connecting with SSH key..."
+            ssh "$HOST_ENTRY"
+        fi
+    else
+        error "Failed to add SSH key automatically"
+        info "You can add it manually by connecting with: ssh ${HOST_ENTRY}-setup"
+        info "Then run: /addkey"
+    fi
+    
+    # Cleanup happens automatically via trap
 fi
