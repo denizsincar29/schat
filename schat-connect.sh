@@ -94,23 +94,31 @@ HOST_ENTRY="schat-${HOSTNAME}"
 info "Configuring SSH client..."
 
 # Check if entry already exists
-if [ -f "$SSH_CONFIG" ] && grep -q "Host $HOST_ENTRY" "$SSH_CONFIG"; then
-    info "SSH config entry already exists for $HOST_ENTRY"
+if [ -f "$SSH_CONFIG" ] && (grep -q "Host ${HOST_ENTRY}-setup" "$SSH_CONFIG" || grep -q "Host $HOST_ENTRY" "$SSH_CONFIG"); then
+    info "SSH config entries already exist for $HOST_ENTRY"
 else
     # Add new entry to SSH config
     cat >> "$SSH_CONFIG" << EOF
 
-# schat connection
+# schat connection (initial setup - use password first to add key)
+Host ${HOST_ENTRY}-setup
+    HostName $HOSTNAME
+    Port $PORT
+    User $USERNAME
+    PreferredAuthentications keyboard-interactive,password
+    StrictHostKeyChecking accept-new
+
+# schat connection (after key is added - use key auth)
 Host $HOST_ENTRY
     HostName $HOSTNAME
     Port $PORT
     User $USERNAME
     IdentityFile $KEY_PATH
-    PreferredAuthentications publickey,keyboard-interactive
+    PreferredAuthentications publickey
     StrictHostKeyChecking accept-new
 
 EOF
-    success "Added SSH config entry: $HOST_ENTRY"
+    success "Added SSH config entries: ${HOST_ENTRY}-setup and $HOST_ENTRY"
 fi
 
 # Ensure correct permissions
@@ -120,31 +128,35 @@ echo ""
 info "Setup complete! Your SSH key is ready."
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "IMPORTANT: You need to add this key to your schat account"
+echo "NEXT STEPS: Add your key to your schat account"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "1. First, login with your password:"
-echo "   ssh -p $PORT $USER_HOST"
+echo "STEP 1: Connect with your password using:"
+echo "   ssh ${HOST_ENTRY}-setup"
 echo ""
-echo "2. Then run the /addkey command and paste this public key:"
+echo "   (Or manually: ssh -p $PORT -o PreferredAuthentications=keyboard-interactive,password $USER_HOST)"
+echo ""
+echo "STEP 2: Once connected, run the /addkey command and paste this public key:"
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 cat "$PUB_KEY_PATH"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "3. Type 'END' on a new line to finish"
+echo "STEP 3: Type 'END' on a new line to finish adding the key"
 echo ""
-echo "After adding the key, you can connect using:"
+echo "STEP 4: After adding the key, reconnect using:"
 echo "   ssh $HOST_ENTRY"
 echo ""
-echo "Or directly with:"
-echo "   ssh -p $PORT -i $KEY_PATH $USER_HOST"
+echo "   (This will use your SSH key for authentication)"
 echo ""
 
 # Ask if user wants to connect now
-read -p "Would you like to connect now with password authentication? (y/n) " -n 1 -r
+read -p "Would you like to connect now with password to add the key? (y/n) " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    info "Connecting to schat..."
-    ssh -p "$PORT" -o PreferredAuthentications=keyboard-interactive "$USER_HOST"
+    info "Connecting to schat with password authentication..."
+    echo ""
+    info "After logging in, run: /addkey"
+    echo ""
+    ssh "${HOST_ENTRY}-setup"
 fi

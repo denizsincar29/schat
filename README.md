@@ -130,9 +130,17 @@ The `schat-connect.sh` script automates SSH key generation and configuration:
 
 The script will:
 1. Generate a new SSH key pair in `~/.ssh/`
-2. Add an entry to your SSH config
+2. Add two entries to your SSH config:
+   - `schat-{hostname}-setup` for initial password-based connection
+   - `schat-{hostname}` for SSH key-based connection after setup
 3. Display your public key to add via `/addkey` command
-4. Optionally connect you to the chat
+4. Optionally connect you to the chat with password authentication
+
+After running the script:
+1. Connect using `ssh schat-{hostname}-setup` (uses password)
+2. Run `/addkey` command and paste the public key shown by the script
+3. Type `END` to finish
+4. Reconnect using `ssh schat-{hostname}` (uses SSH key)
 
 #### Manual Connection
 
