@@ -332,7 +332,10 @@ func handleHelp(user *models.User, args []string) (string, error) {
 		for _, topic := range topics {
 			if topic.Name == topicOrCmd {
 				var result strings.Builder
-				topicTitle := strings.ToUpper(string(topic.Name[0])) + topic.Name[1:]
+				topicTitle := topic.Name
+				if len(topic.Name) > 0 {
+					topicTitle = strings.ToUpper(string(topic.Name[0])) + topic.Name[1:]
+				}
 				result.WriteString(fmt.Sprintf("=== %s Commands ===\n", topicTitle))
 				
 				for _, cmdName := range topic.Commands {
@@ -389,7 +392,10 @@ func handleHelp(user *models.User, args []string) (string, error) {
 			continue
 		}
 		
-		topicTitle := strings.ToUpper(string(topic.Name[0])) + topic.Name[1:]
+		topicTitle := topic.Name
+		if len(topic.Name) > 0 {
+			topicTitle = strings.ToUpper(string(topic.Name[0])) + topic.Name[1:]
+		}
 		result.WriteString(fmt.Sprintf("=== %s ===\n", topicTitle))
 		for _, cmdName := range topic.Commands {
 			cmd := GetCommand(cmdName)
