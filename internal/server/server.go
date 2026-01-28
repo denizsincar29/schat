@@ -269,7 +269,8 @@ func handleRegistration(channel ssh.Channel, username string) {
 	fmt.Fprintf(channel, "\r\nChoose authentication method:\r\n")
 	fmt.Fprintf(channel, "1. Password\r\n")
 	fmt.Fprintf(channel, "2. SSH Key\r\n")
-	terminal.SetPrompt("Enter choice (1 or 2): ")
+	fmt.Fprintf(channel, "Press Enter to join as guest (guests room only)\r\n")
+	terminal.SetPrompt("Enter choice (1, 2, or Enter for guest): ")
 
 	choice, err := terminal.ReadLine()
 	if err != nil {
@@ -277,6 +278,12 @@ func handleRegistration(channel ssh.Channel, username string) {
 		return
 	}
 	choice = strings.TrimSpace(choice)
+
+	// Guest access - empty choice
+	if choice == "" {
+		handleGuestUser(channel, username)
+		return
+	}
 
 	var password, sshKey string
 
@@ -319,13 +326,13 @@ func handleRegistration(channel ssh.Channel, username string) {
 			return
 		}
 	} else {
-		fmt.Fprintf(channel, "Invalid choice. Please enter 1 or 2.\r\n")
+		fmt.Fprintf(channel, "Invalid choice. Please enter 1, 2, or press Enter for guest access.\r\n")
 		return
 	}
 
 	// Check if this is the first user
 	var userCount int64
-	database.DB.Model(&models.User{}).Count(&userCount)
+	database.DB.Model(&models.User{}).Where("is_guest = ?", false).Count(&userCount)
 	isFirstUser := userCount == 0
 
 	// Create user - first user is automatically admin
@@ -348,6 +355,135 @@ func handleRegistration(channel ssh.Channel, username string) {
 	// Immediately authenticate and proceed to chat without reconnection
 	fmt.Fprintf(channel, "Connecting to chat...\r\n\r\n")
 	handleAuthenticatedUser(channel, newUser)
+}
+
+// handleGuestUser creates a temporary guest user and joins them to the guests room
+func handleGuestUser(channel ssh.Channel, username string) {
+	// Get connection remote address for fingerprint
+	sshChan, ok := channel.(interface{ RemoteAddr() net.Addr })
+	var fingerprint string
+	if ok {
+		fingerprint = sshChan.RemoteAddr().String()
+	} else {
+		fingerprint = fmt.Sprintf("guest-%d", time.Now().Unix())
+	}
+
+	// Check if guest is banned by username or fingerprint
+	var guestBan models.GuestBan
+	if err := database.DB.Where("(username = ? OR fingerprint = ?) AND is_active = ? AND expires_at > ?",
+		username, fingerprint, true, time.Now()).First(&guestBan).Error; err == nil {
+		fmt.Fprintf(channel, "\r\nYou are banned from guest access.\r\n")
+		fmt.Fprintf(channel, "Reason: %s\r\n", guestBan.Reason)
+		fmt.Fprintf(channel, "Ban expires: %s\r\n", guestBan.ExpiresAt.Format("2006-01-02 15:04:05"))
+		return
+	}
+
+	// Get the guests room
+	var guestsRoom models.Room
+	if err := database.DB.Where("name = ?", "guests").First(&guestsRoom).Error; err != nil {
+		fmt.Fprintf(channel, "\r\nError: Guests room not found. Please contact an administrator.\r\n")
+		log.Printf("Guests room not found: %v", err)
+		return
+	}
+
+	// Create a temporary guest user
+	guestUser := &models.User{
+		Username:      fmt.Sprintf("guest_%s", username),
+		IsGuest:       true,
+		Fingerprint:   fingerprint,
+		Nickname:      username,
+		CurrentRoomID: &guestsRoom.ID,
+		DefaultRoomID: &guestsRoom.ID,
+		LastSeenAt:    time.Now(),
+		BellEnabled:   false,
+	}
+
+	// Save guest user to database (temporary)
+	if err := database.DB.Create(guestUser).Error; err != nil {
+		fmt.Fprintf(channel, "\r\nError creating guest user: %v\r\n", err)
+		log.Printf("Error creating guest user: %v", err)
+		return
+	}
+
+	fmt.Fprintf(channel, "\r\nJoining as guest (guests room only)...\r\n\r\n")
+	
+	// Start guest session
+	handleGuestSession(channel, guestUser)
+}
+
+// handleGuestSession handles a guest user session (limited to guests room only)
+func handleGuestSession(channel ssh.Channel, user *models.User) {
+	// Update last seen
+	user.LastSeenAt = time.Now()
+	database.DB.Save(user)
+
+	// Start reading input using term.Terminal for proper echo handling
+	terminal := term.NewTerminal(channel, "> ")
+
+	// Add client to server
+	client := &Client{
+		User:     user,
+		Conn:     channel,
+		Terminal: terminal,
+		LastMsg:  time.Now(),
+	}
+	server.mutex.Lock()
+	server.clients[user.ID] = client
+	server.mutex.Unlock()
+
+	defer func() {
+		server.mutex.Lock()
+		delete(server.clients, user.ID)
+		server.mutex.Unlock()
+
+		// Delete guest user from database
+		database.DB.Unscoped().Delete(user)
+
+		logAction(user, "disconnect", "Guest disconnected")
+	}()
+
+	// Welcome message for guests
+	displayName := user.Nickname
+	if displayName == "" {
+		displayName = user.Username
+	}
+
+	fmt.Fprintf(channel, "\n")
+	fmt.Fprintf(channel, "Welcome to the guests room, %s!\n", displayName)
+	fmt.Fprintf(channel, "You are logged in as a guest (limited to guests room only).\n")
+	fmt.Fprintf(channel, "Type /help for available commands.\n")
+	fmt.Fprintf(channel, "\n")
+
+	// Show chat history for guests room
+	showChatHistory(channel, user)
+
+	// Broadcast join message
+	if user.CurrentRoomID != nil {
+		broadcastToRoom(*user.CurrentRoomID, fmt.Sprintf("*** %s (guest) has joined the chat", displayName), user.ID)
+	}
+
+	logAction(user, "guest_connect", "Guest connected")
+
+	// Main message loop (same as regular users but restricted)
+	for {
+		line, err := terminal.ReadLine()
+		if err != nil {
+			break
+		}
+
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// Handle commands (restricted for guests)
+		if strings.HasPrefix(line, "/") {
+			handleGuestCommand(client, line)
+		} else {
+			// Regular message - only in guests room
+			handleGuestMessage(client, line)
+		}
+	}
 }
 
 func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
@@ -387,11 +523,27 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 		logAction(user, "disconnect", "User disconnected")
 	}()
 
-	// Join default room
+	// Join default room - use user's default room if set, otherwise use general
 	var defaultRoom models.Room
-	if err := database.DB.Where("name = ?", "general").First(&defaultRoom).Error; err == nil {
-		user.CurrentRoomID = &defaultRoom.ID
-		database.DB.Save(user)
+	if user.DefaultRoomID != nil {
+		// User has a preferred default room
+		if err := database.DB.First(&defaultRoom, *user.DefaultRoomID).Error; err == nil {
+			user.CurrentRoomID = &defaultRoom.ID
+			database.DB.Save(user)
+		} else {
+			// Default room doesn't exist, fall back to general
+			if err := database.DB.Where("name = ?", "general").First(&defaultRoom).Error; err == nil {
+				user.CurrentRoomID = &defaultRoom.ID
+				database.DB.Save(user)
+			}
+		}
+	} else {
+		// No default room set, use general
+		if err := database.DB.Where("name = ?", "general").First(&defaultRoom).Error; err == nil {
+			user.CurrentRoomID = &defaultRoom.ID
+			user.DefaultRoomID = &defaultRoom.ID // Set it as default for next time
+			database.DB.Save(user)
+		}
 	}
 
 	// Welcome message
@@ -1007,6 +1159,12 @@ func handleMessage(client *Client, message string) {
 	}
 	database.DB.Create(&chatMsg)
 
+	// Update room activity timestamp
+	if client.User.CurrentRoomID != nil {
+		database.DB.Model(&models.Room{}).Where("id = ?", *client.User.CurrentRoomID).
+			Update("last_activity_at", time.Now())
+	}
+
 	// Check for mentions
 	words := strings.Fields(message)
 	for _, word := range words {
@@ -1063,6 +1221,147 @@ func handleMessage(client *Client, message string) {
 	broadcastToRoom(*client.User.CurrentRoomID, formattedMsg, client.User.ID)
 
 	logAction(client.User, "message", fmt.Sprintf("Sent message in room %d", *client.User.CurrentRoomID))
+}
+
+// handleGuestMessage handles messages from guest users (restricted to guests room)
+func handleGuestMessage(client *Client, message string) {
+	// Guest users can only send messages in the guests room
+	if client.User.CurrentRoomID == nil {
+		fmt.Fprintf(client.Conn, "Error: You are not in a room.\n")
+		return
+	}
+
+	// Verify they are in the guests room
+	var currentRoom models.Room
+	if err := database.DB.First(&currentRoom, *client.User.CurrentRoomID).Error; err != nil {
+		fmt.Fprintf(client.Conn, "Error: Could not verify current room.\n")
+		return
+	}
+
+	if currentRoom.Name != "guests" {
+		fmt.Fprintf(client.Conn, "Error: Guests can only chat in the guests room.\n")
+		return
+	}
+
+	// Process message
+	displayName := client.User.Nickname
+	if displayName == "" {
+		displayName = client.User.Username
+	}
+
+	formattedMsg := fmt.Sprintf("%s (guest): %s", displayName, message)
+
+	// Save message to database
+	chatMsg := models.ChatMessage{
+		UserID:  client.User.ID,
+		RoomID:  client.User.CurrentRoomID,
+		Content: message,
+	}
+	database.DB.Create(&chatMsg)
+
+	// Update room activity
+	currentRoom.LastActivityAt = time.Now()
+	database.DB.Save(&currentRoom)
+
+	// Broadcast message to room
+	broadcastToRoom(*client.User.CurrentRoomID, formattedMsg, client.User.ID)
+
+	logAction(client.User, "guest_message", fmt.Sprintf("Guest sent message in room %d", *client.User.CurrentRoomID))
+}
+
+// handleGuestCommand handles commands from guest users (restricted subset)
+func handleGuestCommand(client *Client, line string) {
+	parts := strings.Fields(line[1:]) // Remove leading /
+	if len(parts) == 0 {
+		return
+	}
+
+	cmdName := strings.ToLower(parts[0])
+	args := parts[1:]
+
+	// Only allow specific commands for guests
+	allowedCommands := map[string]bool{
+		"help":  true,
+		"h":     true,
+		"?":     true,
+		"users": true,
+		"me":    true,
+	}
+
+	if !allowedCommands[cmdName] {
+		fmt.Fprintf(client.Conn, "Command not available for guests. Type /help for available commands.\n")
+		return
+	}
+
+	// Handle help specially for guests
+	if cmdName == "help" || cmdName == "h" || cmdName == "?" {
+		fmt.Fprintf(client.Conn, "\nAvailable commands for guests:\n")
+		fmt.Fprintf(client.Conn, "  /help          - Show this help message\n")
+		fmt.Fprintf(client.Conn, "  /users         - List users in the guests room\n")
+		fmt.Fprintf(client.Conn, "  /me <action>   - Send an emote\n")
+		fmt.Fprintf(client.Conn, "\nTo get full access, please register an account.\n\n")
+		return
+	}
+
+	// Handle /me emote
+	if cmdName == "me" {
+		if len(args) == 0 {
+			fmt.Fprintf(client.Conn, "Usage: /me <action>\n")
+			return
+		}
+		action := strings.Join(args, " ")
+		displayName := client.User.Nickname
+		if displayName == "" {
+			displayName = client.User.Username
+		}
+		message := fmt.Sprintf("* %s (guest) %s", displayName, action)
+		
+		// Save to database
+		chatMsg := models.ChatMessage{
+			UserID:  client.User.ID,
+			RoomID:  client.User.CurrentRoomID,
+			Content: action,
+		}
+		database.DB.Create(&chatMsg)
+		
+		// Broadcast
+		if client.User.CurrentRoomID != nil {
+			broadcastToRoom(*client.User.CurrentRoomID, message, client.User.ID)
+		}
+		return
+	}
+
+	// Handle /users
+	if cmdName == "users" {
+		if client.User.CurrentRoomID == nil {
+			fmt.Fprintf(client.Conn, "You are not in a room.\n")
+			return
+		}
+
+		// Get users in current room
+		var users []models.User
+		database.DB.Where("current_room_id = ?", *client.User.CurrentRoomID).Find(&users)
+
+		if len(users) == 0 {
+			fmt.Fprintf(client.Conn, "No users in this room.\n")
+			return
+		}
+
+		fmt.Fprintf(client.Conn, "\nUsers in guests room:\n")
+		for _, u := range users {
+			displayName := u.Username
+			if u.Nickname != "" {
+				displayName = u.Nickname
+			}
+			guestTag := ""
+			if u.IsGuest {
+				guestTag = " (guest)"
+			}
+			fmt.Fprintf(client.Conn, "  - %s%s\n", displayName, guestTag)
+		}
+		fmt.Fprintf(client.Conn, "\n")
+		return
+	}
 }
 
 func broadcastToRoom(roomID uint, message string, excludeUserID uint) {

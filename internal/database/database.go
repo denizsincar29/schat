@@ -66,27 +66,15 @@ func Migrate() error {
 		&models.AuditLog{},
 		&models.Report{},
 		&models.Notification{},
+		&models.GuestBan{},
+		&models.BroadcastMessage{},
 	); err != nil {
 		return fmt.Errorf("failed to migrate dependent tables: %w", err)
 	}
 
-	// Create default room if it doesn't exist
-	var count int64
-	DB.Model(&models.Room{}).Count(&count)
-	if count == 0 {
-		defaultRoom := models.Room{
-			Name:        "general",
-			Description: "Default chat room",
-			IsPrivate:   false,
-			IsPermanent: true,
-		}
-		if err := DB.Create(&defaultRoom).Error; err != nil {
-			return fmt.Errorf("failed to create default room: %w", err)
-		}
-		log.Println("Created default 'general' room")
-	} else {
-		// Ensure general room is permanent
-		DB.Model(&models.Room{}).Where("name = ?", "general").Update("is_permanent", true)
+	// Create default rooms if they don't exist
+	if err := createDefaultRooms(); err != nil {
+		return fmt.Errorf("failed to create default rooms: %w", err)
 	}
 
 	log.Println("Database migrations completed")
@@ -140,6 +128,62 @@ func cleanupSoftDeletedUsers() error {
 	}
 
 	log.Printf("Successfully cleaned up %d soft-deleted user(s)", len(softDeletedUsers))
+	return nil
+}
+
+// createDefaultRooms creates the default preserved rooms (general, guests, dev)
+func createDefaultRooms() error {
+	log.Println("Setting up default rooms...")
+
+	// Define default rooms
+	defaultRooms := []models.Room{
+		{
+			Name:        "general",
+			Description: "Default chat room",
+			IsPrivate:   false,
+			IsHidden:    false,
+			IsPermanent: true,
+		},
+		{
+			Name:        "guests",
+			Description: "Guest room - open to everyone without authentication",
+			IsPrivate:   false,
+			IsHidden:    false,
+			IsPermanent: true,
+		},
+		{
+			Name:        "dev",
+			Description: "Developer room (hidden)",
+			IsPrivate:   false,
+			IsHidden:    true,
+			IsPermanent: true,
+		},
+	}
+
+	// Create or update each room
+	for _, room := range defaultRooms {
+		var existingRoom models.Room
+		result := DB.Where("name = ?", room.Name).First(&existingRoom)
+		
+		if result.Error == nil {
+			// Room exists, update its properties
+			DB.Model(&existingRoom).Updates(map[string]interface{}{
+				"description": room.Description,
+				"is_private":  room.IsPrivate,
+				"is_hidden":   room.IsHidden,
+				"is_permanent": room.IsPermanent,
+			})
+			log.Printf("Updated room: %s", room.Name)
+		} else {
+			// Room doesn't exist, create it
+			if err := DB.Create(&room).Error; err != nil {
+				return fmt.Errorf("failed to create room %s: %w", room.Name, err)
+			}
+			log.Printf("Created room: %s", room.Name)
+		}
+	}
+
+	log.Println("Default rooms setup completed")
 	return nil
 }
 

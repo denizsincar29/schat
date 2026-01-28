@@ -305,6 +305,67 @@ func init() {
 		Usage:       "/setpassword #<room_name> <password> (use 'none' to remove)",
 		Handler:     handleSetPassword,
 	})
+
+	registerCommand(&Command{
+		Name:        "banguest",
+		Aliases:     []string{"guestban"},
+		Description: "Ban a guest by username or fingerprint (admin only)",
+		Usage:       "/banguest <guest_username> <duration> [reason]",
+		Handler:     handleBanGuest,
+		AdminOnly:   true,
+	})
+
+	registerCommand(&Command{
+		Name:        "unbanguest",
+		Aliases:     []string{"guestunban"},
+		Description: "Unban a guest (admin only)",
+		Usage:       "/unbanguest <guest_username>",
+		Handler:     handleUnbanGuest,
+		AdminOnly:   true,
+	})
+
+	registerCommand(&Command{
+		Name:        "inactive",
+		Aliases:     []string{"inactivity", "lastmessage"},
+		Description: "Check inactivity time for current room or specific room",
+		Usage:       "/inactive [#room_name]",
+		Handler:     handleInactive,
+	})
+
+	registerCommand(&Command{
+		Name:        "setdefault",
+		Aliases:     []string{"defaultroom"},
+		Description: "Set your default room to join on login",
+		Usage:       "/setdefault [#room_name]",
+		Handler:     handleSetDefault,
+	})
+
+	registerCommand(&Command{
+		Name:        "broadcast",
+		Aliases:     []string{"schedulebroadcast", "announce"},
+		Description: "Schedule a broadcast message with reminders (admin only)",
+		Usage:       "/broadcast",
+		Handler:     handleBroadcast,
+		AdminOnly:   true,
+	})
+
+	registerCommand(&Command{
+		Name:        "broadcasts",
+		Aliases:     []string{"listbroadcasts"},
+		Description: "List scheduled broadcast messages (admin only)",
+		Usage:       "/broadcasts",
+		Handler:     handleListBroadcasts,
+		AdminOnly:   true,
+	})
+
+	registerCommand(&Command{
+		Name:        "cancelbroadcast",
+		Aliases:     []string{"deletebroadcast", "removebroadcast"},
+		Description: "Cancel a scheduled broadcast (admin only)",
+		Usage:       "/cancelbroadcast <id>",
+		Handler:     handleCancelBroadcast,
+		AdminOnly:   true,
+	})
 }
 
 func registerCommand(cmd *Command) {
@@ -1568,3 +1629,223 @@ func handleSetPassword(user *models.User, args []string) (string, error) {
 
 	return fmt.Sprintf("Password set for room: #%s", roomName), nil
 }
+
+func handleBanGuest(user *models.User, args []string) (string, error) {
+	if len(args) < 2 {
+		return "", fmt.Errorf("usage: /banguest <guest_username> <duration> [reason]")
+	}
+
+	guestUsername := args[0]
+	durationStr := args[1]
+	reason := "No reason provided"
+	if len(args) > 2 {
+		reason = strings.Join(args[2:], " ")
+	}
+
+	// Parse duration
+	duration, err := parseDuration(durationStr)
+	if err != nil {
+		return "", fmt.Errorf("invalid duration: %v", err)
+	}
+
+	// Find guest user(s) matching the username
+	var guests []models.User
+	if err := database.DB.Where("username LIKE ? AND is_guest = ?", "guest_"+guestUsername, true).Find(&guests).Error; err != nil {
+		return "", fmt.Errorf("no guest found with username: %s", guestUsername)
+	}
+
+	if len(guests) == 0 {
+		return "", fmt.Errorf("no guest found with username: %s", guestUsername)
+	}
+
+	expiresAt := time.Now().Add(duration)
+	bannedCount := 0
+
+	// Ban all matching guests (by fingerprint and username)
+	for _, guest := range guests {
+		// Create guest ban entry
+		guestBan := models.GuestBan{
+			Fingerprint: guest.Fingerprint,
+			Username:    guestUsername,
+			BannedByID:  user.ID,
+			Reason:      reason,
+			ExpiresAt:   expiresAt,
+			IsActive:    true,
+		}
+		if err := database.DB.Create(&guestBan).Error; err != nil {
+			continue
+		}
+		bannedCount++
+	}
+
+	if bannedCount == 0 {
+		return "", fmt.Errorf("failed to ban guest")
+	}
+
+	return fmt.Sprintf("Banned guest '%s' (and fingerprints) until %s. Reason: %s",
+		guestUsername, expiresAt.Format("2006-01-02 15:04:05"), reason), nil
+}
+
+func handleUnbanGuest(user *models.User, args []string) (string, error) {
+	if len(args) < 1 {
+		return "", fmt.Errorf("usage: /unbanguest <guest_username>")
+	}
+
+	guestUsername := args[0]
+
+	// Deactivate all bans for this guest username
+	result := database.DB.Model(&models.GuestBan{}).
+		Where("username = ? AND is_active = ?", guestUsername, true).
+		Update("is_active", false)
+
+	if result.Error != nil {
+		return "", fmt.Errorf("failed to unban guest: %v", result.Error)
+	}
+
+	if result.RowsAffected == 0 {
+		return "", fmt.Errorf("no active ban found for guest: %s", guestUsername)
+	}
+
+	return fmt.Sprintf("Unbanned guest: %s", guestUsername), nil
+}
+
+func handleInactive(user *models.User, args []string) (string, error) {
+	var room models.Room
+	var roomName string
+
+	if len(args) > 0 {
+		// Check specific room
+		roomName = stripPrefixes(args[0])
+		if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
+			return "", fmt.Errorf("room not found: %s", roomName)
+		}
+	} else {
+		// Check current room
+		if user.CurrentRoomID == nil {
+			return "", fmt.Errorf("you are not in a room. Usage: /inactive [#room_name]")
+		}
+		if err := database.DB.First(&room, *user.CurrentRoomID).Error; err != nil {
+			return "", fmt.Errorf("could not find current room")
+		}
+		roomName = room.Name
+	}
+
+	// Calculate inactivity time
+	if room.LastActivityAt.IsZero() {
+		return fmt.Sprintf("Room #%s has no recorded activity", roomName), nil
+	}
+
+	inactivity := time.Since(room.LastActivityAt)
+	
+	// Format inactivity duration
+	days := int(inactivity.Hours() / 24)
+	hours := int(inactivity.Hours()) % 24
+	minutes := int(inactivity.Minutes()) % 60
+
+	var parts []string
+	if days > 0 {
+		parts = append(parts, fmt.Sprintf("%d day(s)", days))
+	}
+	if hours > 0 {
+		parts = append(parts, fmt.Sprintf("%d hour(s)", hours))
+	}
+	if minutes > 0 || len(parts) == 0 {
+		parts = append(parts, fmt.Sprintf("%d minute(s)", minutes))
+	}
+
+	inactivityStr := strings.Join(parts, ", ")
+	lastActivity := room.LastActivityAt.Format("2006-01-02 15:04:05")
+
+	return fmt.Sprintf("Room #%s has been inactive for %s\nLast activity: %s", 
+		roomName, inactivityStr, lastActivity), nil
+}
+
+func handleSetDefault(user *models.User, args []string) (string, error) {
+	if len(args) == 0 {
+		// Show current default room
+		if user.DefaultRoomID == nil {
+			return "You have no default room set. Currently using 'general'.", nil
+		}
+		var room models.Room
+		if err := database.DB.First(&room, *user.DefaultRoomID).Error; err != nil {
+			return "Your default room no longer exists. Currently using 'general'.", nil
+		}
+		return fmt.Sprintf("Your default room is: #%s", room.Name), nil
+	}
+
+	roomName := stripPrefixes(args[0])
+
+	// Find the room
+	var room models.Room
+	if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
+		return "", fmt.Errorf("room not found: %s", roomName)
+	}
+
+	// Check if room is hidden and user is not admin
+	if room.IsHidden && !user.IsAdmin {
+		return "", fmt.Errorf("room not found: %s", roomName)
+	}
+
+	// Set as default room
+	user.DefaultRoomID = &room.ID
+	if err := database.DB.Save(user).Error; err != nil {
+		return "", fmt.Errorf("failed to set default room: %v", err)
+	}
+
+	return fmt.Sprintf("Default room set to: #%s", roomName), nil
+}
+
+func handleBroadcast(user *models.User, args []string) (string, error) {
+	// This command is interactive and requires terminal access
+	// For now, return instructions for manual DB insertion or future implementation
+	return "", fmt.Errorf("broadcast command requires interactive setup. Please use the interactive broadcast system (to be implemented)")
+}
+
+func handleListBroadcasts(user *models.User, args []string) (string, error) {
+	var broadcasts []models.BroadcastMessage
+	if err := database.DB.Where("is_sent = ?", false).Order("scheduled_at ASC").Find(&broadcasts).Error; err != nil {
+		return "", fmt.Errorf("failed to fetch broadcasts: %v", err)
+	}
+
+	if len(broadcasts) == 0 {
+		return "No scheduled broadcasts.", nil
+	}
+
+	var result strings.Builder
+	result.WriteString("Scheduled Broadcasts:\n\n")
+
+	for _, broadcast := range broadcasts {
+		result.WriteString(fmt.Sprintf("ID: %d\n", broadcast.ID))
+		result.WriteString(fmt.Sprintf("Scheduled: %s\n", broadcast.ScheduledAt.Format("2006-01-02 15:04:05")))
+		result.WriteString(fmt.Sprintf("Base Time: %s\n", broadcast.BaseTime.Format("2006-01-02 15:04:05")))
+		result.WriteString(fmt.Sprintf("Offset: %d minutes\n", broadcast.MinuteOffset))
+		result.WriteString(fmt.Sprintf("Message: %s\n", broadcast.Message))
+		result.WriteString("\n")
+	}
+
+	return result.String(), nil
+}
+
+func handleCancelBroadcast(user *models.User, args []string) (string, error) {
+	if len(args) < 1 {
+		return "", fmt.Errorf("usage: /cancelbroadcast <id>")
+	}
+
+	broadcastID, err := strconv.ParseUint(args[0], 10, 64)
+	if err != nil {
+		return "", fmt.Errorf("invalid broadcast ID: %s", args[0])
+	}
+
+	// Delete the broadcast
+	result := database.DB.Delete(&models.BroadcastMessage{}, broadcastID)
+	if result.Error != nil {
+		return "", fmt.Errorf("failed to cancel broadcast: %v", result.Error)
+	}
+
+	if result.RowsAffected == 0 {
+		return "", fmt.Errorf("broadcast not found: %d", broadcastID)
+	}
+
+	return fmt.Sprintf("Cancelled broadcast ID: %d", broadcastID), nil
+}
+

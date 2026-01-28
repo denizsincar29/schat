@@ -8,32 +8,37 @@ import (
 
 type User struct {
 	gorm.Model
-	Username      string `gorm:"unique;not null"`
-	PasswordHash  string
-	SSHKey        string `gorm:"type:text"`
-	IsAdmin       bool   `gorm:"default:false"`
-	Nickname      string
-	Status        string
-	BellEnabled   bool  `gorm:"default:true"`
-	CurrentRoomID *uint `gorm:"constraint:OnDelete:SET NULL;"`
-	CurrentRoom   *Room `gorm:"foreignKey:CurrentRoomID"`
-	IsBanned      bool  `gorm:"default:false"`
-	BanExpiresAt  *time.Time
-	IsMuted       bool `gorm:"default:false"`
-	MuteExpiresAt *time.Time
-	LastSeenAt    time.Time
+	Username       string `gorm:"unique;not null"`
+	PasswordHash   string
+	SSHKey         string `gorm:"type:text"`
+	IsAdmin        bool   `gorm:"default:false"`
+	IsGuest        bool   `gorm:"default:false"`
+	Fingerprint    string // SSH connection fingerprint for guest identification
+	Nickname       string
+	Status         string
+	BellEnabled    bool  `gorm:"default:true"`
+	CurrentRoomID  *uint `gorm:"constraint:OnDelete:SET NULL;"`
+	CurrentRoom    *Room `gorm:"foreignKey:CurrentRoomID"`
+	DefaultRoomID  *uint `gorm:"constraint:OnDelete:SET NULL;"`
+	DefaultRoom    *Room `gorm:"foreignKey:DefaultRoomID"`
+	IsBanned       bool  `gorm:"default:false"`
+	BanExpiresAt   *time.Time
+	IsMuted        bool `gorm:"default:false"`
+	MuteExpiresAt  *time.Time
+	LastSeenAt     time.Time
 }
 
 type Room struct {
 	gorm.Model
-	Name        string `gorm:"unique;not null"`
-	Description string
-	IsPrivate   bool `gorm:"default:false"`
-	IsHidden    bool `gorm:"default:false"`
-	IsPermanent bool `gorm:"default:false"`
-	CreatorID   *uint
-	Creator     *User  `gorm:"foreignKey:CreatorID;constraint:OnDelete:SET NULL;"`
-	Password    string // Password for passworded rooms (hashed)
+	Name           string `gorm:"unique;not null"`
+	Description    string
+	IsPrivate      bool `gorm:"default:false"`
+	IsHidden       bool `gorm:"default:false"`
+	IsPermanent    bool `gorm:"default:false"`
+	CreatorID      *uint
+	Creator        *User  `gorm:"foreignKey:CreatorID;constraint:OnDelete:SET NULL;"`
+	Password       string // Password for passworded rooms (hashed)
+	LastActivityAt time.Time
 }
 
 type ChatMessage struct {
@@ -113,3 +118,29 @@ type Notification struct {
 	RelatedUser *uint  // User who performed the action
 	RelatedRoom *uint  // Room related to the action
 }
+
+// GuestBan stores bans for guest users by fingerprint or username
+type GuestBan struct {
+	gorm.Model
+	Fingerprint string `gorm:"index"` // SSH connection fingerprint
+	Username    string `gorm:"index"` // Guest username
+	BannedByID  uint
+	BannedBy    User      `gorm:"foreignKey:BannedByID"`
+	Reason      string    `gorm:"type:text"`
+	ExpiresAt   time.Time
+	IsActive    bool `gorm:"default:true"`
+}
+
+// BroadcastMessage stores scheduled broadcast messages
+type BroadcastMessage struct {
+	gorm.Model
+	CreatorID    uint
+	Creator      User      `gorm:"foreignKey:CreatorID"`
+	BaseTime     time.Time `gorm:"not null"` // The main event time
+	BaseMessage  string    `gorm:"type:text;not null"`
+	ScheduledAt  time.Time `gorm:"not null;index"` // When to send this particular message
+	Message      string    `gorm:"type:text;not null"`
+	IsSent       bool      `gorm:"default:false"`
+	MinuteOffset int       // Minutes relative to BaseTime (negative = before, positive = after)
+}
+
