@@ -1796,9 +1796,9 @@ func handleSetDefault(user *models.User, args []string) (string, error) {
 }
 
 func handleBroadcast(user *models.User, args []string) (string, error) {
-	// This command is interactive and requires terminal access
-	// For now, return instructions for manual DB insertion or future implementation
-	return "", fmt.Errorf("broadcast command requires interactive setup. Please use the interactive broadcast system (to be implemented)")
+	// This command is handled interactively in server.go
+	// This handler should not be called
+	return "", fmt.Errorf("this command requires interactive mode")
 }
 
 func handleListBroadcasts(user *models.User, args []string) (string, error) {

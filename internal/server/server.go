@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -125,6 +126,9 @@ func Run() error {
 
 	// Start background cleanup routine
 	go cleanupExpiredBansAndMutes()
+	
+	// Start broadcast scheduler
+	go broadcastScheduler()
 
 	// Accept connections
 	for {
@@ -778,6 +782,16 @@ func handleCommand(client *Client, line string) {
 		return
 	}
 
+	// Special handling for /broadcast command which requires interactive input
+	if cmdName == "broadcast" || cmdName == "schedulebroadcast" || cmdName == "announce" {
+		if !client.User.IsAdmin {
+			fmt.Fprintf(client.Conn, "This command requires admin privileges\n")
+			return
+		}
+		handleBroadcastInteractive(client)
+		return
+	}
+
 	cmd := commands.GetCommand(cmdName)
 	if cmd == nil {
 		fmt.Fprintf(client.Conn, "Unknown command: %s\n", cmdName)
@@ -1118,6 +1132,155 @@ func qrCodeToUnicode(qr *qrcode.QRCode) string {
 	result.WriteString("\n")
 
 	return result.String()
+}
+
+// handleBroadcastInteractive handles the interactive broadcast scheduling
+func handleBroadcastInteractive(client *Client) {
+	fmt.Fprintf(client.Conn, "\n=== Schedule Broadcast Message ===\n\n")
+	
+	originalPrompt := "> "
+	
+	// Get base time
+	client.Terminal.SetPrompt("Enter base time (YYYY-MM-DD HH:MM): ")
+	baseTimeStr, err := client.Terminal.ReadLine()
+	if err != nil {
+		fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+	baseTimeStr = strings.TrimSpace(baseTimeStr)
+	
+	// Parse base time
+	baseTime, err := time.Parse("2006-01-02 15:04", baseTimeStr)
+	if err != nil {
+		fmt.Fprintf(client.Conn, "\nInvalid time format. Please use: YYYY-MM-DD HH:MM\n")
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+	
+	// Ensure base time is in the future
+	if baseTime.Before(time.Now()) {
+		fmt.Fprintf(client.Conn, "\nBase time must be in the future.\n")
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+	
+	// Get base time message
+	client.Terminal.SetPrompt("Enter message for base time: ")
+	baseMessage, err := client.Terminal.ReadLine()
+	if err != nil {
+		fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+	baseMessage = strings.TrimSpace(baseMessage)
+	
+	if baseMessage == "" {
+		fmt.Fprintf(client.Conn, "\nMessage cannot be empty.\n")
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+	
+	// Create base time broadcast
+	baseBroadcast := models.BroadcastMessage{
+		CreatorID:    client.User.ID,
+		BaseTime:     baseTime,
+		BaseMessage:  baseMessage,
+		ScheduledAt:  baseTime,
+		Message:      baseMessage,
+		MinuteOffset: 0,
+		IsSent:       false,
+	}
+	
+	var broadcasts []models.BroadcastMessage
+	broadcasts = append(broadcasts, baseBroadcast)
+	
+	// Ask for reminders
+	fmt.Fprintf(client.Conn, "\n")
+	for {
+		client.Terminal.SetPrompt("Add a reminder? (y/n): ")
+		addReminder, err := client.Terminal.ReadLine()
+		if err != nil {
+			fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+			client.Terminal.SetPrompt(originalPrompt)
+			return
+		}
+		addReminder = strings.ToLower(strings.TrimSpace(addReminder))
+		
+		if addReminder != "y" && addReminder != "yes" {
+			break
+		}
+		
+		// Get offset
+		client.Terminal.SetPrompt("Enter minutes offset (negative for before, positive for after): ")
+		offsetStr, err := client.Terminal.ReadLine()
+		if err != nil {
+			fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+			client.Terminal.SetPrompt(originalPrompt)
+			return
+		}
+		offsetStr = strings.TrimSpace(offsetStr)
+		
+		offset, err := strconv.Atoi(offsetStr)
+		if err != nil {
+			fmt.Fprintf(client.Conn, "\nInvalid offset. Please enter a number.\n")
+			continue
+		}
+		
+		// Get reminder message
+		client.Terminal.SetPrompt("Enter reminder message: ")
+		reminderMsg, err := client.Terminal.ReadLine()
+		if err != nil {
+			fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+			client.Terminal.SetPrompt(originalPrompt)
+			return
+		}
+		reminderMsg = strings.TrimSpace(reminderMsg)
+		
+		if reminderMsg == "" {
+			fmt.Fprintf(client.Conn, "\nMessage cannot be empty.\n")
+			continue
+		}
+		
+		// Calculate scheduled time
+		scheduledAt := baseTime.Add(time.Duration(offset) * time.Minute)
+		
+		// Ensure scheduled time is in the future
+		if scheduledAt.Before(time.Now()) {
+			fmt.Fprintf(client.Conn, "\nScheduled time would be in the past. Skipping.\n")
+			continue
+		}
+		
+		reminder := models.BroadcastMessage{
+			CreatorID:    client.User.ID,
+			BaseTime:     baseTime,
+			BaseMessage:  baseMessage,
+			ScheduledAt:  scheduledAt,
+			Message:      reminderMsg,
+			MinuteOffset: offset,
+			IsSent:       false,
+		}
+		
+		broadcasts = append(broadcasts, reminder)
+		fmt.Fprintf(client.Conn, "Reminder added for %s\n", scheduledAt.Format("2006-01-02 15:04:05"))
+	}
+	
+	// Save all broadcasts
+	for _, broadcast := range broadcasts {
+		if err := database.DB.Create(&broadcast).Error; err != nil {
+			fmt.Fprintf(client.Conn, "\nError saving broadcast: %v\n", err)
+			client.Terminal.SetPrompt(originalPrompt)
+			return
+		}
+	}
+	
+	fmt.Fprintf(client.Conn, "\nBroadcast scheduled successfully!\n")
+	fmt.Fprintf(client.Conn, "Base time: %s\n", baseTime.Format("2006-01-02 15:04:05"))
+	fmt.Fprintf(client.Conn, "Total messages: %d\n\n", len(broadcasts))
+	
+	client.Terminal.SetPrompt(originalPrompt)
+	
+	logAction(client.User, "schedule_broadcast", fmt.Sprintf("Scheduled %d broadcast message(s)", len(broadcasts)))
 }
 
 func handleMessage(client *Client, message string) {
@@ -1535,6 +1698,60 @@ func cleanupExpiredBansAndMutes() {
 		database.DB.Model(&models.Mute{}).
 			Where("is_active = ? AND expires_at < ?", true, now).
 			Update("is_active", false)
+			
+		// Cleanup expired guest bans
+		database.DB.Model(&models.GuestBan{}).
+			Where("is_active = ? AND expires_at < ?", true, now).
+			Update("is_active", false)
+	}
+}
+
+// broadcastScheduler checks for scheduled broadcasts and sends them
+func broadcastScheduler() {
+	ticker := time.NewTicker(30 * time.Second) // Check every 30 seconds
+	defer ticker.Stop()
+
+	for range ticker.C {
+		now := time.Now()
+
+		// Find broadcasts that are due and not yet sent
+		var broadcasts []models.BroadcastMessage
+		if err := database.DB.Where("is_sent = ? AND scheduled_at <= ?", false, now).
+			Find(&broadcasts).Error; err != nil {
+			log.Printf("Error fetching broadcasts: %v", err)
+			continue
+		}
+
+		for _, broadcast := range broadcasts {
+			// Check if there are any users online
+			server.mutex.RLock()
+			userCount := len(server.clients)
+			server.mutex.RUnlock()
+
+			if userCount == 0 {
+				log.Printf("Skipping broadcast %d - no users online", broadcast.ID)
+				continue
+			}
+
+			// Send the broadcast to all users
+			message := fmt.Sprintf("\n*** BROADCAST *** %s\n", broadcast.Message)
+			
+			server.mutex.RLock()
+			for _, client := range server.clients {
+				client.Mutex.Lock()
+				client.Terminal.Write([]byte(message))
+				client.Mutex.Unlock()
+			}
+			server.mutex.RUnlock()
+
+			// Mark as sent
+			broadcast.IsSent = true
+			if err := database.DB.Save(&broadcast).Error; err != nil {
+				log.Printf("Error marking broadcast as sent: %v", err)
+			} else {
+				log.Printf("Sent broadcast %d to %d users", broadcast.ID, userCount)
+			}
+		}
 	}
 }
 
