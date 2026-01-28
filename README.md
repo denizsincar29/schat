@@ -50,16 +50,15 @@ A feature-rich SSH-based chat application written in Go with support for user re
 - `/report @username <reason>` - Report a user to admins
 - `/setdefault [#room_name]` - Set or view your default room
 - `/inactive [#room_name]` - Check inactivity time for current or specified room
+- `/signup` - Convert guest account to full user account (guests only)
 
 ### Admin Commands
 
-- `/ban @username <duration> [reason]` - Ban a user
+- `/ban @username <duration> [reason]` - Ban a user or guest
 - `/kick @username <duration> [reason]` - Kick a user
 - `/mute @username <duration> [reason]` - Mute a user
-- `/unban @username` - Unban a user
+- `/unban @username` - Unban a user or guest
 - `/unmute @username` - Unmute a user
-- `/banguest <guest_username> <duration> [reason]` - Ban a guest user
-- `/unbanguest <guest_username>` - Unban a guest user
 - `/promote @username` - Promote a user to admin
 - `/demote @username` - Remove admin privileges from a user
 - `/deleteuser @username` - Delete a user permanently
@@ -71,6 +70,8 @@ A feature-rich SSH-based chat application written in Go with support for user re
 - `/cancelbroadcast <id>` - Cancel a scheduled broadcast
 
 Duration format: `5m`, `2h`, `1:30` (MM:SS), or `1:30:00` (HH:MM:SS)
+
+**Note**: The `/ban` and `/unban` commands now work for both regular users and guests. Use the guest's nickname to ban them.
 
 ## Setup with Docker
 
@@ -186,8 +187,15 @@ When prompted for authentication method, simply press Enter to join as a guest. 
 - Can only access the "guests" room
 - Cannot join other rooms or send private messages
 - Are automatically removed when they disconnect
-- Can be banned by admins using `/banguest` command
-- Bans are based on username and connection fingerprint
+- Can be banned by admins using the `/ban` command (same as regular users)
+- Can convert to full user accounts using the `/signup` command
+
+To convert a guest account to a full user account, use the `/signup` command while logged in as a guest. You'll be prompted to:
+1. Choose a permanent username
+2. Select authentication method (password or SSH key)
+3. Set up your credentials
+
+After signup, you'll have access to all rooms and features.
 
 **Login (existing users):**
 ```bash
@@ -259,11 +267,10 @@ Configuration is done via environment variables:
 ## Database Schema
 
 The application uses the following tables:
-- `users` - User accounts and settings (includes default room preferences)
+- `users` - User accounts and settings (includes default room preferences and guest flags)
 - `rooms` - Chat rooms (includes inactivity tracking)
 - `chat_messages` - Chat message history
-- `bans` - User ban records
-- `guest_bans` - Guest user ban records (by fingerprint/username)
+- `bans` - User and guest ban records (unified)
 - `mutes` - User mute records
 - `mentions` - User mention tracking
 - `broadcast_messages` - Scheduled broadcast messages

@@ -2,7 +2,6 @@ package commands
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -308,21 +307,11 @@ func init() {
 	})
 
 	registerCommand(&Command{
-		Name:        "banguest",
-		Aliases:     []string{"guestban"},
-		Description: "Ban a guest by username or fingerprint (admin only)",
-		Usage:       "/banguest <guest_username> <duration> [reason]",
-		Handler:     handleBanGuest,
-		AdminOnly:   true,
-	})
-
-	registerCommand(&Command{
-		Name:        "unbanguest",
-		Aliases:     []string{"guestunban"},
-		Description: "Unban a guest (admin only)",
-		Usage:       "/unbanguest <guest_username>",
-		Handler:     handleUnbanGuest,
-		AdminOnly:   true,
+		Name:        "signup",
+		Aliases:     []string{"register"},
+		Description: "Convert guest account to full user account (guests only)",
+		Usage:       "/signup",
+		Handler:     handleSignup,
 	})
 
 	registerCommand(&Command{
@@ -929,9 +918,16 @@ func handleBan(user *models.User, args []string) (string, error) {
 		return "", fmt.Errorf("invalid duration: %w", err)
 	}
 
+	// Try to find user by username first
 	var targetUser models.User
-	if err := database.DB.Where("username = ?", username).First(&targetUser).Error; err != nil {
-		return "", fmt.Errorf("user not found: @%s", username)
+	err = database.DB.Where("username = ?", username).First(&targetUser).Error
+	
+	// If not found by username, try to find guest by nickname
+	if err != nil {
+		err = database.DB.Where("nickname = ? AND is_guest = ?", username, true).First(&targetUser).Error
+		if err != nil {
+			return "", fmt.Errorf("user not found: @%s", username)
+		}
 	}
 
 	if targetUser.IsAdmin {
@@ -954,7 +950,11 @@ func handleBan(user *models.User, args []string) (string, error) {
 	}
 	database.DB.Create(&ban)
 
-	logAction(user, "ban", fmt.Sprintf("Banned %s for %s: %s", username, durationStr, reason))
+	userType := "user"
+	if targetUser.IsGuest {
+		userType = "guest"
+	}
+	logAction(user, "ban", fmt.Sprintf("Banned %s %s for %s: %s", userType, username, durationStr, reason))
 
 	return fmt.Sprintf("Banned @%s until %s", username, expiresAt.Format("2006-01-02 15:04:05")), nil
 }
@@ -1017,9 +1017,17 @@ func handleUnban(user *models.User, args []string) (string, error) {
 	}
 
 	username := strings.TrimPrefix(args[0], "@")
+	
+	// Try to find user by username first
 	var targetUser models.User
-	if err := database.DB.Where("username = ?", username).First(&targetUser).Error; err != nil {
-		return "", fmt.Errorf("user not found: @%s", username)
+	err := database.DB.Where("username = ?", username).First(&targetUser).Error
+	
+	// If not found by username, try to find guest by nickname
+	if err != nil {
+		err = database.DB.Where("nickname = ? AND is_guest = ?", username, true).First(&targetUser).Error
+		if err != nil {
+			return "", fmt.Errorf("user not found: @%s", username)
+		}
 	}
 
 	targetUser.IsBanned = false
@@ -1631,92 +1639,10 @@ func handleSetPassword(user *models.User, args []string) (string, error) {
 	return fmt.Sprintf("Password set for room: #%s", roomName), nil
 }
 
-func handleBanGuest(user *models.User, args []string) (string, error) {
-	if len(args) < 2 {
-		return "", fmt.Errorf("usage: /banguest <guest_username> <duration> [reason]")
-	}
-
-	guestUsername := args[0]
-	durationStr := args[1]
-	reason := "No reason provided"
-	if len(args) > 2 {
-		reason = strings.Join(args[2:], " ")
-	}
-
-	// Parse duration
-	duration, err := parseDuration(durationStr)
-	if err != nil {
-		return "", fmt.Errorf("invalid duration: %v", err)
-	}
-
-	expiresAt := time.Now().Add(duration)
-
-	// Find currently connected guest users matching the nickname (not the full username)
-	var guests []models.User
-	if err := database.DB.Where("nickname = ? AND is_guest = ?", guestUsername, true).Find(&guests).Error; err != nil {
-		// Continue even if no guests found - we'll still create the ban
-		log.Printf("Error finding guests: %v", err)
-	}
-
-	// Collect fingerprints from currently connected guests
-	fingerprints := make(map[string]bool)
-	for _, guest := range guests {
-		if guest.Fingerprint != "" {
-			fingerprints[guest.Fingerprint] = true
-		}
-	}
-
-	// Create guest ban entry with username (for future joins)
-	guestBan := models.GuestBan{
-		Username:   guestUsername,
-		BannedByID: user.ID,
-		Reason:     reason,
-		ExpiresAt:  expiresAt,
-		IsActive:   true,
-	}
-	if err := database.DB.Create(&guestBan).Error; err != nil {
-		return "", fmt.Errorf("failed to create guest ban: %v", err)
-	}
-
-	// Also create ban entries for known fingerprints
-	for fp := range fingerprints {
-		fpBan := models.GuestBan{
-			Fingerprint: fp,
-			Username:    guestUsername,
-			BannedByID:  user.ID,
-			Reason:      reason,
-			ExpiresAt:   expiresAt,
-			IsActive:    true,
-		}
-		database.DB.Create(&fpBan)
-	}
-
-	fingerprintCount := len(fingerprints)
-	return fmt.Sprintf("Banned guest '%s' (and %d fingerprint(s)) until %s. Reason: %s",
-		guestUsername, fingerprintCount, expiresAt.Format("2006-01-02 15:04:05"), reason), nil
-}
-
-func handleUnbanGuest(user *models.User, args []string) (string, error) {
-	if len(args) < 1 {
-		return "", fmt.Errorf("usage: /unbanguest <guest_username>")
-	}
-
-	guestUsername := args[0]
-
-	// Deactivate all bans for this guest username
-	result := database.DB.Model(&models.GuestBan{}).
-		Where("username = ? AND is_active = ?", guestUsername, true).
-		Update("is_active", false)
-
-	if result.Error != nil {
-		return "", fmt.Errorf("failed to unban guest: %v", result.Error)
-	}
-
-	if result.RowsAffected == 0 {
-		return "", fmt.Errorf("no active ban found for guest: %s", guestUsername)
-	}
-
-	return fmt.Sprintf("Unbanned guest: %s", guestUsername), nil
+func handleSignup(user *models.User, args []string) (string, error) {
+	// This command is handled interactively in server.go
+	// This handler should not be called
+	return "", fmt.Errorf("this command requires interactive mode")
 }
 
 func handleInactive(user *models.User, args []string) (string, error) {

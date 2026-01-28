@@ -13,7 +13,6 @@ type User struct {
 	SSHKey         string `gorm:"type:text"`
 	IsAdmin        bool   `gorm:"default:false"`
 	IsGuest        bool   `gorm:"default:false"`
-	Fingerprint    string // SSH connection fingerprint for guest identification
 	Nickname       string
 	Status         string
 	BellEnabled    bool  `gorm:"default:true"`
@@ -117,18 +116,6 @@ type Notification struct {
 	IsRead      bool   `gorm:"default:false"`
 	RelatedUser *uint  // User who performed the action
 	RelatedRoom *uint  // Room related to the action
-}
-
-// GuestBan stores bans for guest users by fingerprint or username
-type GuestBan struct {
-	gorm.Model
-	Fingerprint string `gorm:"index"` // SSH connection fingerprint
-	Username    string `gorm:"index"` // Guest username
-	BannedByID  uint
-	BannedBy    User      `gorm:"foreignKey:BannedByID"`
-	Reason      string    `gorm:"type:text"`
-	ExpiresAt   time.Time
-	IsActive    bool `gorm:"default:true"`
 }
 
 // BroadcastMessage stores scheduled broadcast messages

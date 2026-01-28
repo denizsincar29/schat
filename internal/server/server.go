@@ -364,22 +364,17 @@ func handleRegistration(channel ssh.Channel, username string) {
 
 // handleGuestUser creates a temporary guest user and joins them to the guests room
 func handleGuestUser(channel ssh.Channel, username string) {
-	// Get connection remote address for fingerprint
-	sshChan, ok := channel.(interface{ RemoteAddr() net.Addr })
-	var fingerprint string
-	if ok {
-		fingerprint = sshChan.RemoteAddr().String()
-	} else {
-		fingerprint = fmt.Sprintf("guest-%d", time.Now().Unix())
-	}
-
-	// Check if guest is banned by username or fingerprint
-	var guestBan models.GuestBan
-	if err := database.DB.Where("(username = ? OR fingerprint = ?) AND is_active = ? AND expires_at > ?",
-		username, fingerprint, true, time.Now()).First(&guestBan).Error; err == nil {
+	// Check if there's a banned guest with this nickname
+	var bannedGuest models.User
+	err := database.DB.Where("nickname = ? AND is_guest = ? AND is_banned = ? AND ban_expires_at > ?",
+		username, true, true, time.Now()).First(&bannedGuest).Error
+	
+	if err == nil {
+		// Found a banned guest with this nickname
 		fmt.Fprintf(channel, "\r\nYou are banned from guest access.\r\n")
-		fmt.Fprintf(channel, "Reason: %s\r\n", guestBan.Reason)
-		fmt.Fprintf(channel, "Ban expires: %s\r\n", guestBan.ExpiresAt.Format("2006-01-02 15:04:05"))
+		if bannedGuest.BanExpiresAt != nil {
+			fmt.Fprintf(channel, "Ban expires: %s\r\n", bannedGuest.BanExpiresAt.Format("2006-01-02 15:04:05"))
+		}
 		return
 	}
 
@@ -398,7 +393,6 @@ func handleGuestUser(channel ssh.Channel, username string) {
 	guestUser := &models.User{
 		Username:      guestUsername,
 		IsGuest:       true,
-		Fingerprint:   fingerprint,
 		Nickname:      username,
 		CurrentRoomID: &guestsRoom.ID,
 		DefaultRoomID: &guestsRoom.ID,
@@ -783,6 +777,16 @@ func handleCommand(client *Client, line string) {
 	// Special handling for /qr command to generate QR codes
 	if cmdName == "qr" {
 		handleQRCode(client, args)
+		return
+	}
+
+	// Special handling for /signup command which requires interactive input
+	if cmdName == "signup" || cmdName == "register" {
+		if !client.User.IsGuest {
+			fmt.Fprintf(client.Conn, "This command is only available for guest users\n")
+			return
+		}
+		handleSignupInteractive(client)
 		return
 	}
 
@@ -1287,6 +1291,142 @@ func handleBroadcastInteractive(client *Client) {
 	logAction(client.User, "schedule_broadcast", fmt.Sprintf("Scheduled %d broadcast message(s)", len(broadcasts)))
 }
 
+// handleSignupInteractive converts a guest user to a full user account
+func handleSignupInteractive(client *Client) {
+	fmt.Fprintf(client.Conn, "\n=== Convert Guest to Full Account ===\n\n")
+	fmt.Fprintf(client.Conn, "You are currently logged in as guest: %s\n", client.User.Nickname)
+	fmt.Fprintf(client.Conn, "Let's create a permanent account for you.\n\n")
+	
+	originalPrompt := "> "
+	
+	// Get desired username
+	client.Terminal.SetPrompt("Enter your desired username: ")
+	username, err := client.Terminal.ReadLine()
+	if err != nil {
+		fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+	username = strings.TrimSpace(username)
+	
+	if username == "" {
+		fmt.Fprintf(client.Conn, "\nUsername cannot be empty.\n")
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+	
+	// Check if username already exists
+	var existingUser models.User
+	if err := database.DB.Where("username = ?", username).First(&existingUser).Error; err == nil {
+		fmt.Fprintf(client.Conn, "\nUsername '%s' is already taken. Please try another.\n", username)
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+	
+	// Choose authentication method
+	fmt.Fprintf(client.Conn, "\nChoose authentication method:\n")
+	fmt.Fprintf(client.Conn, "1. Password\n")
+	fmt.Fprintf(client.Conn, "2. SSH Key\n")
+	client.Terminal.SetPrompt("Enter choice (1 or 2): ")
+	
+	choice, err := client.Terminal.ReadLine()
+	if err != nil {
+		fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+	choice = strings.TrimSpace(choice)
+	
+	var password, sshKey string
+	
+	if choice == "1" {
+		client.Terminal.SetPrompt("\r\nEnter password (visible): ")
+		line, err := client.Terminal.ReadLine()
+		if err != nil {
+			fmt.Fprintf(client.Conn, "\r\nError reading input: %v\r\n", err)
+			client.Terminal.SetPrompt(originalPrompt)
+			return
+		}
+		password = strings.TrimSpace(line)
+		
+		if password == "" {
+			fmt.Fprintf(client.Conn, "Password cannot be empty\r\n")
+			client.Terminal.SetPrompt(originalPrompt)
+			return
+		}
+	} else if choice == "2" {
+		fmt.Fprintf(client.Conn, "\r\nPaste your SSH public key (end with a line containing only 'END'):\r\n")
+		client.Terminal.SetPrompt("")
+		var keyLines []string
+		for {
+			line, err := client.Terminal.ReadLine()
+			if err != nil {
+				fmt.Fprintf(client.Conn, "\r\nError reading input: %v\r\n", err)
+				client.Terminal.SetPrompt(originalPrompt)
+				return
+			}
+			line = strings.TrimSpace(line)
+			if line == "END" {
+				break
+			}
+			if line != "" {
+				keyLines = append(keyLines, line)
+			}
+		}
+		sshKey = strings.Join(keyLines, " ")
+		
+		if sshKey == "" {
+			fmt.Fprintf(client.Conn, "SSH key cannot be empty\r\n")
+			client.Terminal.SetPrompt(originalPrompt)
+			return
+		}
+	} else {
+		fmt.Fprintf(client.Conn, "Invalid choice. Please enter 1 or 2.\r\n")
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+	
+	// Update the guest user to become a full user
+	client.User.Username = username
+	client.User.IsGuest = false
+	
+	if password != "" {
+		hashedPassword, err := auth.HashPassword(password)
+		if err != nil {
+			fmt.Fprintf(client.Conn, "\r\nFailed to hash password: %v\r\n", err)
+			client.Terminal.SetPrompt(originalPrompt)
+			return
+		}
+		client.User.PasswordHash = hashedPassword
+	}
+	
+	if sshKey != "" {
+		// Validate SSH key format
+		_, _, _, _, err := ssh.ParseAuthorizedKey([]byte(sshKey))
+		if err != nil {
+			fmt.Fprintf(client.Conn, "\r\nInvalid SSH key format: %v\r\n", err)
+			client.Terminal.SetPrompt(originalPrompt)
+			return
+		}
+		client.User.SSHKey = sshKey
+	}
+	
+	// Save the updated user
+	if err := database.DB.Save(client.User).Error; err != nil {
+		fmt.Fprintf(client.Conn, "\r\nFailed to create account: %v\r\n", err)
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+	
+	fmt.Fprintf(client.Conn, "\r\nAccount created successfully!\r\n")
+	fmt.Fprintf(client.Conn, "You are now a full user: %s\r\n", username)
+	fmt.Fprintf(client.Conn, "You can now access all rooms and features.\r\n\n")
+	
+	client.Terminal.SetPrompt(originalPrompt)
+	
+	logAction(client.User, "signup", fmt.Sprintf("Guest %s converted to user %s", client.User.Nickname, username))
+}
+
 func handleMessage(client *Client, message string) {
 	// Check if user is in a room
 	if client.User.CurrentRoomID == nil {
@@ -1706,11 +1846,6 @@ func cleanupExpiredBansAndMutes() {
 			})
 
 		database.DB.Model(&models.Mute{}).
-			Where("is_active = ? AND expires_at < ?", true, now).
-			Update("is_active", false)
-			
-		// Cleanup expired guest bans
-		database.DB.Model(&models.GuestBan{}).
 			Where("is_active = ? AND expires_at < ?", true, now).
 			Update("is_active", false)
 	}
