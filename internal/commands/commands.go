@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -1648,42 +1649,51 @@ func handleBanGuest(user *models.User, args []string) (string, error) {
 		return "", fmt.Errorf("invalid duration: %v", err)
 	}
 
-	// Find guest user(s) matching the username
-	var guests []models.User
-	if err := database.DB.Where("username LIKE ? AND is_guest = ?", "guest_"+guestUsername, true).Find(&guests).Error; err != nil {
-		return "", fmt.Errorf("no guest found with username: %s", guestUsername)
-	}
-
-	if len(guests) == 0 {
-		return "", fmt.Errorf("no guest found with username: %s", guestUsername)
-	}
-
 	expiresAt := time.Now().Add(duration)
-	bannedCount := 0
 
-	// Ban all matching guests (by fingerprint and username)
+	// Find currently connected guest users matching the nickname (not the full username)
+	var guests []models.User
+	if err := database.DB.Where("nickname = ? AND is_guest = ?", guestUsername, true).Find(&guests).Error; err != nil {
+		// Continue even if no guests found - we'll still create the ban
+		log.Printf("Error finding guests: %v", err)
+	}
+
+	// Collect fingerprints from currently connected guests
+	fingerprints := make(map[string]bool)
 	for _, guest := range guests {
-		// Create guest ban entry
-		guestBan := models.GuestBan{
-			Fingerprint: guest.Fingerprint,
+		if guest.Fingerprint != "" {
+			fingerprints[guest.Fingerprint] = true
+		}
+	}
+
+	// Create guest ban entry with username (for future joins)
+	guestBan := models.GuestBan{
+		Username:   guestUsername,
+		BannedByID: user.ID,
+		Reason:     reason,
+		ExpiresAt:  expiresAt,
+		IsActive:   true,
+	}
+	if err := database.DB.Create(&guestBan).Error; err != nil {
+		return "", fmt.Errorf("failed to create guest ban: %v", err)
+	}
+
+	// Also create ban entries for known fingerprints
+	for fp := range fingerprints {
+		fpBan := models.GuestBan{
+			Fingerprint: fp,
 			Username:    guestUsername,
 			BannedByID:  user.ID,
 			Reason:      reason,
 			ExpiresAt:   expiresAt,
 			IsActive:    true,
 		}
-		if err := database.DB.Create(&guestBan).Error; err != nil {
-			continue
-		}
-		bannedCount++
+		database.DB.Create(&fpBan)
 	}
 
-	if bannedCount == 0 {
-		return "", fmt.Errorf("failed to ban guest")
-	}
-
-	return fmt.Sprintf("Banned guest '%s' (and fingerprints) until %s. Reason: %s",
-		guestUsername, expiresAt.Format("2006-01-02 15:04:05"), reason), nil
+	fingerprintCount := len(fingerprints)
+	return fmt.Sprintf("Banned guest '%s' (and %d fingerprint(s)) until %s. Reason: %s",
+		guestUsername, fingerprintCount, expiresAt.Format("2006-01-02 15:04:05"), reason), nil
 }
 
 func handleUnbanGuest(user *models.User, args []string) (string, error) {

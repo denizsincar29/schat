@@ -24,6 +24,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -390,9 +391,12 @@ func handleGuestUser(channel ssh.Channel, username string) {
 		return
 	}
 
+	// Create a unique guest username with timestamp to avoid collisions
+	guestUsername := fmt.Sprintf("guest_%s_%d", username, time.Now().UnixNano())
+	
 	// Create a temporary guest user
 	guestUser := &models.User{
-		Username:      fmt.Sprintf("guest_%s", username),
+		Username:      guestUsername,
 		IsGuest:       true,
 		Fingerprint:   fingerprint,
 		Nickname:      username,
@@ -1487,6 +1491,12 @@ func handleGuestCommand(client *Client, line string) {
 		}
 		database.DB.Create(&chatMsg)
 		
+		// Update room activity timestamp
+		if client.User.CurrentRoomID != nil {
+			database.DB.Model(&models.Room{}).Where("id = ?", *client.User.CurrentRoomID).
+				Update("last_activity_at", time.Now())
+		}
+		
 		// Broadcast
 		if client.User.CurrentRoomID != nil {
 			broadcastToRoom(*client.User.CurrentRoomID, message, client.User.ID)
@@ -1715,25 +1725,54 @@ func broadcastScheduler() {
 		now := time.Now()
 
 		// Find broadcasts that are due and not yet sent
+		// Use a transaction to prevent race conditions
 		var broadcasts []models.BroadcastMessage
-		if err := database.DB.Where("is_sent = ? AND scheduled_at <= ?", false, now).
-			Find(&broadcasts).Error; err != nil {
+		err := database.DB.Transaction(func(tx *gorm.DB) error {
+			// Lock rows for update
+			if err := tx.Where("is_sent = ? AND scheduled_at <= ?", false, now).
+				Clauses(clause.Locking{Strength: "UPDATE"}).
+				Find(&broadcasts).Error; err != nil {
+				return err
+			}
+
+			// Mark them as sent immediately to prevent duplicate sends
+			if len(broadcasts) > 0 {
+				var ids []uint
+				for _, b := range broadcasts {
+					ids = append(ids, b.ID)
+				}
+				if err := tx.Model(&models.BroadcastMessage{}).
+					Where("id IN ?", ids).
+					Update("is_sent", true).Error; err != nil {
+					return err
+				}
+			}
+
+			return nil
+		})
+
+		if err != nil {
 			log.Printf("Error fetching broadcasts: %v", err)
 			continue
 		}
 
+		if len(broadcasts) == 0 {
+			continue
+		}
+
+		// Check if there are any users online
+		server.mutex.RLock()
+		userCount := len(server.clients)
+		server.mutex.RUnlock()
+
+		if userCount == 0 {
+			log.Printf("Skipping %d broadcast(s) - no users online", len(broadcasts))
+			// Broadcasts remain marked as sent - they won't be retried
+			continue
+		}
+
+		// Send broadcasts to all users
 		for _, broadcast := range broadcasts {
-			// Check if there are any users online
-			server.mutex.RLock()
-			userCount := len(server.clients)
-			server.mutex.RUnlock()
-
-			if userCount == 0 {
-				log.Printf("Skipping broadcast %d - no users online", broadcast.ID)
-				continue
-			}
-
-			// Send the broadcast to all users
 			message := fmt.Sprintf("\n*** BROADCAST *** %s\n", broadcast.Message)
 			
 			server.mutex.RLock()
@@ -1744,13 +1783,7 @@ func broadcastScheduler() {
 			}
 			server.mutex.RUnlock()
 
-			// Mark as sent
-			broadcast.IsSent = true
-			if err := database.DB.Save(&broadcast).Error; err != nil {
-				log.Printf("Error marking broadcast as sent: %v", err)
-			} else {
-				log.Printf("Sent broadcast %d to %d users", broadcast.ID, userCount)
-			}
+			log.Printf("Sent broadcast %d to %d users", broadcast.ID, userCount)
 		}
 	}
 }
