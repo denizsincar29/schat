@@ -570,6 +570,25 @@ func handleGuestSession(channel ssh.Channel, user *models.User, ctx *sessionCont
 	server.mutex.Unlock()
 
 	defer func() {
+		// Broadcast leave message for guests
+		displayName := user.Nickname
+		if displayName == "" {
+			displayName = user.Username
+		}
+		
+		if user.CurrentRoomID != nil {
+			var room models.Room
+			database.DB.First(&room, user.CurrentRoomID)
+			
+			// Broadcast to room users
+			broadcastToRoom(*user.CurrentRoomID, fmt.Sprintf("*** %s (guest) has left the chat", displayName), user.ID)
+			
+			// Notify all admins about guest leave (regardless of their current room)
+			sendNotificationToAdmins("user_left", 
+				fmt.Sprintf("Guest %s left #%s", displayName, room.Name), 
+				&user.ID, user.CurrentRoomID)
+		}
+		
 		server.mutex.Lock()
 		delete(server.clients, user.ID)
 		server.mutex.Unlock()
@@ -598,6 +617,14 @@ func handleGuestSession(channel ssh.Channel, user *models.User, ctx *sessionCont
 	// Broadcast join message
 	if user.CurrentRoomID != nil {
 		broadcastToRoom(*user.CurrentRoomID, fmt.Sprintf("*** %s (guest) has joined the chat", displayName), user.ID)
+		
+		// Notify all admins about guest join (regardless of their current room)
+		var room models.Room
+		if err := database.DB.First(&room, user.CurrentRoomID).Error; err == nil {
+			sendNotificationToAdmins("user_joined", 
+				fmt.Sprintf("Guest %s joined #%s", displayName, room.Name), 
+				&user.ID, user.CurrentRoomID)
+		}
 	}
 
 	logAction(user, "guest_connect", "Guest connected")
@@ -729,6 +756,14 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User, ctx *sessio
 	// Broadcast join message
 	if user.CurrentRoomID != nil {
 		broadcastToRoom(*user.CurrentRoomID, fmt.Sprintf("*** %s has joined the chat", displayName), user.ID)
+		
+		// Notify all admins about user join (regardless of their current room)
+		var room models.Room
+		if err := database.DB.First(&room, user.CurrentRoomID).Error; err == nil {
+			sendNotificationToAdmins("user_joined", 
+				fmt.Sprintf("%s joined #%s", displayName, room.Name), 
+				&user.ID, user.CurrentRoomID)
+		}
 	}
 
 	logAction(user, "connect", "User connected")
@@ -848,8 +883,10 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User, ctx *sessio
 						}
 						userPrefix = userPrefix[1:]
 
-						// Add "admin" as a special completion option
+						// Add special completion options
 						completions = append(completions, "@admin")
+						completions = append(completions, "@everyone")
+						completions = append(completions, "@me")
 
 						var users []models.User
 						// Use database filtering for efficiency
@@ -908,7 +945,16 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User, ctx *sessio
 
 	// Broadcast leave message
 	if user.CurrentRoomID != nil {
+		var room models.Room
+		database.DB.First(&room, user.CurrentRoomID)
+		
+		// Broadcast to room users
 		broadcastToRoom(*user.CurrentRoomID, fmt.Sprintf("*** %s has left the chat", displayName), user.ID)
+		
+		// Notify all admins about user leave (regardless of their current room)
+		sendNotificationToAdmins("user_left", 
+			fmt.Sprintf("%s left #%s", displayName, room.Name), 
+			&user.ID, user.CurrentRoomID)
 	}
 }
 
@@ -1634,6 +1680,35 @@ func handleMessage(client *Client, message string) {
 			// Strip trailing punctuation
 			mentionedUsername := strings.TrimPrefix(word, "@")
 			mentionedUsername = strings.TrimRight(mentionedUsername, ".,!?;:")
+
+			// Handle @me - skip (doesn't make sense to mention yourself)
+			if mentionedUsername == "me" {
+				continue
+			}
+
+			// Handle @everyone - notify all users in the current room
+			if mentionedUsername == "everyone" {
+				var roomUsers []models.User
+				database.DB.Where("current_room_id = ?", client.User.CurrentRoomID).Find(&roomUsers)
+				for _, roomUser := range roomUsers {
+					if roomUser.ID == client.User.ID {
+						continue // Don't create mention for yourself
+					}
+					mention := models.Mention{
+						UserID:    roomUser.ID,
+						MessageID: chatMsg.ID,
+					}
+					database.DB.Create(&mention)
+
+					// Send bell notification
+					server.mutex.RLock()
+					if userClient, ok := server.clients[roomUser.ID]; ok {
+						userClient.Terminal.Write([]byte("\a"))
+					}
+					server.mutex.RUnlock()
+				}
+				continue
+			}
 
 			// Handle @admin - notify all admins
 			if mentionedUsername == "admin" {
