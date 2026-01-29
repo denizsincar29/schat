@@ -29,15 +29,17 @@ type User struct {
 
 type Room struct {
 	gorm.Model
-	Name           string `gorm:"unique;not null"`
-	Description    string
-	IsPrivate      bool `gorm:"default:false"`
-	IsHidden       bool `gorm:"default:false"`
-	IsPermanent    bool `gorm:"default:false"`
-	CreatorID      *uint
-	Creator        *User  `gorm:"foreignKey:CreatorID;constraint:OnDelete:SET NULL;"`
-	Password       string // Password for passworded rooms (hashed)
-	LastActivityAt time.Time
+	Name            string `gorm:"unique;not null"`
+	Description     string
+	IsPrivate       bool `gorm:"default:false"`
+	IsHidden        bool `gorm:"default:false"`
+	IsPermanent     bool `gorm:"default:false"`
+	CreatorID       *uint
+	Creator         *User  `gorm:"foreignKey:CreatorID;constraint:OnDelete:SET NULL;"`
+	Password        string // Password for passworded rooms (hashed)
+	LastActivityAt  time.Time
+	MaxParticipants *int       // Maximum number of participants (nil = unlimited)
+	ExpiresAt       *time.Time // Room expiration time (nil = never expires)
 }
 
 type ChatMessage struct {

@@ -184,6 +184,9 @@ func Run() error {
 	// Start background cleanup routine
 	go cleanupExpiredBansAndMutes()
 	
+	// Start room expiration cleanup
+	go cleanupExpiredRooms()
+	
 	// Start broadcast scheduler
 	go broadcastScheduler()
 
@@ -237,11 +240,12 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *s
 
 	// Channel to signal when PTY/shell setup is complete
 	setupDone := make(chan bool, 1)
+	ptyReceived := make(chan bool, 1)
 	
 	// Session context to track PTY dimensions and client reference
 	ctx := &sessionContext{
-		width:  80, // Default width
-		height: 24, // Default height
+		width:  0, // Will be set by pty-req
+		height: 0, // Will be set by pty-req
 	}
 
 	// Handle session requests
@@ -269,6 +273,12 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *s
 							uint32(req.Payload[offset+6])<<8 | 
 							uint32(req.Payload[offset+7]))
 						ctx.mu.Unlock()
+						
+						// Signal that PTY dimensions are set
+						select {
+						case ptyReceived <- true:
+						default:
+						}
 					}
 				}
 				req.Reply(true, nil)
@@ -320,12 +330,26 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *s
 		}
 	}()
 
-	// Wait for setup to complete or timeout
+	// Wait for PTY setup to complete first, then shell
 	select {
-	case <-setupDone:
-		// Setup complete, proceed
-	case <-time.After(200 * time.Millisecond):
-		// Timeout, proceed anyway
+	case <-ptyReceived:
+		// PTY received, now wait for shell or timeout
+		select {
+		case <-setupDone:
+			// Setup complete, proceed
+		case <-time.After(300 * time.Millisecond):
+			// Timeout, proceed anyway
+		}
+	case <-time.After(500 * time.Millisecond):
+		// Timeout waiting for PTY, use defaults
+		ctx.mu.Lock()
+		if ctx.width == 0 {
+			ctx.width = 80
+		}
+		if ctx.height == 0 {
+			ctx.height = 24
+		}
+		ctx.mu.Unlock()
 	}
 
 	// Check if user is authenticated
@@ -1629,6 +1653,11 @@ func handleSignupInteractive(client *Client) {
 }
 
 func handleMessage(client *Client, message string) {
+	// Restrict empty messages
+	if strings.TrimSpace(message) == "" {
+		return
+	}
+
 	// Check if user is in a room
 	if client.User.CurrentRoomID == nil {
 		fmt.Fprintf(client.Terminal, "You are not in a room. Use /join <room> to join one.\n")
@@ -1762,6 +1791,11 @@ func handleMessage(client *Client, message string) {
 
 // handleGuestMessage handles messages from guest users (restricted to guests room)
 func handleGuestMessage(client *Client, message string) {
+	// Restrict empty messages
+	if strings.TrimSpace(message) == "" {
+		return
+	}
+
 	// Guest users can only send messages in the guests room
 	if client.User.CurrentRoomID == nil {
 		fmt.Fprintf(client.Terminal, "Error: You are not in a room.\n")
@@ -1818,11 +1852,12 @@ func handleGuestCommand(client *Client, line string) {
 
 	// Only allow specific commands for guests
 	allowedCommands := map[string]bool{
-		"help":  true,
-		"h":     true,
-		"?":     true,
-		"users": true,
-		"me":    true,
+		"help":     true,
+		"h":        true,
+		"?":        true,
+		"users":    true,
+		"me":       true,
+		"mentions": true,
 	}
 
 	if !allowedCommands[cmdName] {
@@ -1836,7 +1871,36 @@ func handleGuestCommand(client *Client, line string) {
 		fmt.Fprintf(client.Terminal, "  /help          - Show this help message\n")
 		fmt.Fprintf(client.Terminal, "  /users         - List users in the guests room\n")
 		fmt.Fprintf(client.Terminal, "  /me <action>   - Send an emote\n")
+		fmt.Fprintf(client.Terminal, "  /mentions      - View your unread mentions\n")
 		fmt.Fprintf(client.Terminal, "\nTo get full access, please register an account.\n\n")
+		return
+	}
+
+	// Handle /mentions
+	if cmdName == "mentions" {
+		var mentions []models.Mention
+		if err := database.DB.Preload("Message").Preload("Message.User").
+			Where("user_id = ? AND is_read = ?", client.User.ID, false).
+			Find(&mentions).Error; err != nil {
+			fmt.Fprintf(client.Terminal, "Error fetching mentions: %v\n", err)
+			return
+		}
+
+		if len(mentions) == 0 {
+			fmt.Fprintf(client.Terminal, "No unread mentions\n")
+			return
+		}
+
+		fmt.Fprintf(client.Terminal, "\nUnread mentions:\n")
+		for _, mention := range mentions {
+			fmt.Fprintf(client.Terminal, "  From %s: %s\n",
+				mention.Message.User.Username, mention.Message.Content)
+		}
+		fmt.Fprintf(client.Terminal, "\n")
+
+		// Mark mentions as read
+		database.DB.Model(&models.Mention{}).Where("user_id = ? AND is_read = ?", client.User.ID, false).
+			Update("is_read", true)
 		return
 	}
 
@@ -1952,6 +2016,11 @@ func sendNotificationToAdmins(notifType string, message string, relatedUser *uin
 	}
 
 	for _, admin := range admins {
+		// Don't notify admin about their own actions
+		if relatedUser != nil && admin.ID == *relatedUser {
+			continue
+		}
+
 		// Create notification in database
 		createNotification(admin.ID, notifType, message, relatedUser, relatedRoom)
 
@@ -2043,6 +2112,66 @@ func cleanupEmptyRooms() {
 				log.Printf("Error deleting empty room %s: %v", room.Name, err)
 			} else {
 				log.Printf("Cleaned up empty room: %s", room.Name)
+			}
+		}
+	}
+}
+
+// cleanupExpiredRooms checks for rooms that have expired and disconnects all users
+func cleanupExpiredRooms() {
+	ticker := time.NewTicker(30 * time.Second) // Check every 30 seconds
+	defer ticker.Stop()
+
+	for range ticker.C {
+		now := time.Now()
+
+		// Find expired rooms (excluding permanent rooms)
+		var expiredRooms []models.Room
+		if err := database.DB.Where("expires_at IS NOT NULL AND expires_at <= ? AND is_permanent = ?", now, false).
+			Find(&expiredRooms).Error; err != nil {
+			log.Printf("Error fetching expired rooms: %v", err)
+			continue
+		}
+
+		for _, room := range expiredRooms {
+			// Find all users in this room
+			var users []models.User
+			if err := database.DB.Where("current_room_id = ?", room.ID).Find(&users).Error; err != nil {
+				log.Printf("Error fetching users in expired room %s: %v", room.Name, err)
+				continue
+			}
+
+			// Move all users to the general room
+			var generalRoom models.Room
+			if err := database.DB.Where("name = ?", "general").First(&generalRoom).Error; err != nil {
+				log.Printf("Error finding general room: %v", err)
+				continue
+			}
+
+			// Batch notify online users - acquire lock once
+			server.mutex.RLock()
+			for _, user := range users {
+				// Update user's room
+				user.CurrentRoomID = &generalRoom.ID
+				if err := database.DB.Save(&user).Error; err != nil {
+					log.Printf("Error moving user %s from expired room: %v", user.Username, err)
+					continue
+				}
+
+				// Notify user if they are online
+				if client, ok := server.clients[user.ID]; ok {
+					client.Mutex.Lock()
+					client.Terminal.Write([]byte(fmt.Sprintf("\n*** Room #%s has expired. You have been moved to #general.\n", room.Name)))
+					client.Mutex.Unlock()
+				}
+			}
+			server.mutex.RUnlock()
+
+			// Delete the expired room
+			if err := database.DB.Delete(&room).Error; err != nil {
+				log.Printf("Error deleting expired room %s: %v", room.Name, err)
+			} else {
+				log.Printf("Deleted expired room: %s", room.Name)
 			}
 		}
 	}

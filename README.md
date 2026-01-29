@@ -5,14 +5,16 @@ A feature-rich SSH-based chat application written in Go with support for user re
 ## Features
 
 - **Seamless SSH Connection Handling**: Connect via SSH with password or key-based authentication
-- **Guest Access**: Join the chat as a guest without registration (guests room only)
+- **Guest Access**: Join the chat as a guest without registration (guests room only, with /mentions support)
 - **User Registration**: Easy registration process via SSH - no reconnection needed after registration
 - **Default Rooms**: Each user has a default room they join on login
 - **Preserved Rooms**: Special rooms (general, guests, dev) that are always available
+- **Advanced Room Features**: Create rooms with max participants limit and expiration time
 - **Admin Roles**: Elevated privileges for administrators (first user is auto-admin)
 - **Admin Management**: Promote/demote users and manage the admin team
+- **Smart Notifications**: Admins don't receive notifications about their own actions
 - **Tab Completion**: Smart autocomplete for commands, usernames (with @ prefix), and room names
-- **Real-time Chat**: Instant messaging with other users
+- **Real-time Chat**: Instant messaging with other users (empty messages are prevented)
 - **Chat History**: See last 10 messages when connecting to chat
 - **Room Support**: Create and join multiple chat rooms
 - **Inactivity Tracking**: Check how long a room has been inactive
@@ -29,6 +31,7 @@ A feature-rich SSH-based chat application written in Go with support for user re
 - **Emotes**: Express yourself with /me commands
 - **Audit Logging**: Track all user actions and messages
 - **Bell Notifications**: Optional sound notifications for mentions
+- **Terminal Width Detection**: Proper terminal width detection on connection
 - **Screenreader Friendly**: Clean text-based UI without ASCII art
 
 ## Commands
@@ -36,15 +39,15 @@ A feature-rich SSH-based chat application written in Go with support for user re
 - `/help` - Show available commands
 - `/rooms` - List available rooms
 - `/join <room>` - Join a room
-- `/create <room> [description]` - Create a new room
+- `/create <room> [--password <password>] [--max-participants <n>] [--expires-in <duration>] [description]` - Create a new room with optional settings
 - `/msg @username <message>` - Send a private message
 - `/nick <nickname>` - Set your nickname
 - `/status <message>` - Set your status message
 - `/users` - List users in current room
-- `/mentions` - View unread mentions
+- `/mentions` - View unread mentions (available to guests)
 - `/news` - View unread mentions and private messages
 - `/bell` - Toggle bell notifications
-- `/me <action>` - Send an emote
+- `/me <action>` - Send an emote (available to guests)
 - `/addkey [pp] [mr]` - Add SSH key (replaces password unless `pp` flag is used; use `mr` for machine-readable output)
 - `/qr <text or URL>` - Generate and send a QR code to the chat
 - `/report @username <reason>` - Report a user to admins
@@ -72,6 +75,47 @@ A feature-rich SSH-based chat application written in Go with support for user re
 Duration format: `5m`, `2h`, `1:30` (MM:SS), or `1:30:00` (HH:MM:SS)
 
 **Note**: The `/ban` and `/unban` commands now work for both regular users and guests. Use the guest's nickname to ban them.
+
+## Room Features
+
+### Creating Rooms with Advanced Options
+
+When creating a room, you can specify several optional parameters:
+
+```bash
+/create #myroom --password secret123 --max-participants 10 --expires-in 2h This is my room description
+```
+
+Options:
+- `--password` or `-p`: Set a password for the room (hashed securely)
+- `--max-participants` or `--max`: Limit the number of users who can join (e.g., `--max-participants 10`)
+- `--expires-in` or `--expires`: Set room expiration time (e.g., `30m`, `2h`, `1h30m`)
+
+Examples:
+```bash
+# Create a room that expires in 30 minutes
+/create #quick-meeting --expires-in 30m Temporary discussion room
+
+# Create a room with max 5 participants
+/create #small-group --max-participants 5 Exclusive chat
+
+# Create a password-protected room with expiration
+/create #secret-party --password party123 --expires-in 3h VIP access only
+```
+
+When a room expires:
+- All users in the room are automatically moved to the #general room
+- Users receive a notification about the room expiration
+- The room is deleted from the system
+
+### Guest Permissions
+
+Guests have limited but useful permissions:
+- Can send messages in the #guests room only
+- Can use `/help`, `/users`, `/me`, and `/mentions` commands
+- Cannot create rooms or send private messages
+- Can view and respond to @mentions
+- Can convert to a full user account with `/signup`
 
 ## Setup with Docker
 

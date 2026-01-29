@@ -594,6 +594,20 @@ func handleJoin(user *models.User, args []string) (string, error) {
 		return "", fmt.Errorf("room not found: %s", roomName)
 	}
 
+	// Check if room has expired
+	if room.ExpiresAt != nil && room.ExpiresAt.Before(time.Now()) {
+		return "", fmt.Errorf("room #%s has expired", roomName)
+	}
+
+	// Check if room has max participants limit
+	if room.MaxParticipants != nil {
+		var currentCount int64
+		database.DB.Model(&models.User{}).Where("current_room_id = ?", room.ID).Count(&currentCount)
+		if int(currentCount) >= *room.MaxParticipants {
+			return "", fmt.Errorf("room #%s is full (max %d participants)", roomName, *room.MaxParticipants)
+		}
+	}
+
 	// Check if room has a password
 	if room.Password != "" {
 		// Room is password-protected
@@ -617,7 +631,7 @@ func handleJoin(user *models.User, args []string) (string, error) {
 
 func handleCreate(user *models.User, args []string) (string, error) {
 	if len(args) < 1 {
-		return "", fmt.Errorf("usage: /create #<room_name> [--password <password>] [description]")
+		return "", fmt.Errorf("usage: /create #<room_name> [--password <password>] [--max-participants <n>] [--expires-in <duration>] [description]")
 	}
 
 	roomName := stripPrefixes(args[0])
@@ -640,8 +654,10 @@ func handleCreate(user *models.User, args []string) (string, error) {
 		return "", fmt.Errorf("room name must be at most 32 characters long")
 	}
 
-	// Parse arguments for password and description
+	// Parse arguments for password, max participants, expiration, and description
 	var password string
+	var maxParticipants *int
+	var expiresAt *time.Time
 	var descriptionParts []string
 	i := 1
 	for i < len(args) {
@@ -650,6 +666,33 @@ func handleCreate(user *models.User, args []string) (string, error) {
 				return "", fmt.Errorf("--password flag requires a password argument")
 			}
 			password = args[i+1]
+			i += 2
+		} else if args[i] == "--max-participants" || args[i] == "--max" {
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("--max-participants flag requires a number argument")
+			}
+			maxPart, err := strconv.Atoi(args[i+1])
+			if err != nil || maxPart < 1 {
+				return "", fmt.Errorf("--max-participants must be a positive number")
+			}
+			if maxPart > 1000 {
+				return "", fmt.Errorf("--max-participants cannot exceed 1000")
+			}
+			maxParticipants = &maxPart
+			i += 2
+		} else if args[i] == "--expires-in" || args[i] == "--expires" {
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("--expires-in flag requires a duration argument (e.g., 30m, 2h, 1h30m)")
+			}
+			duration, err := time.ParseDuration(args[i+1])
+			if err != nil {
+				return "", fmt.Errorf("invalid duration format: %s (use format like 30m, 2h, 1h30m)", args[i+1])
+			}
+			if duration < 2*time.Minute {
+				return "", fmt.Errorf("expiration time must be at least 2 minutes")
+			}
+			expireTime := time.Now().Add(duration)
+			expiresAt = &expireTime
 			i += 2
 		} else {
 			descriptionParts = append(descriptionParts, args[i])
@@ -661,9 +704,11 @@ func handleCreate(user *models.User, args []string) (string, error) {
 
 	creatorID := user.ID
 	room := models.Room{
-		Name:        roomName,
-		Description: description,
-		CreatorID:   &creatorID,
+		Name:            roomName,
+		Description:     description,
+		CreatorID:       &creatorID,
+		MaxParticipants: maxParticipants,
+		ExpiresAt:       expiresAt,
 	}
 
 	// Hash password if provided
@@ -679,10 +724,18 @@ func handleCreate(user *models.User, args []string) (string, error) {
 		return "", fmt.Errorf("failed to create room: %w", err)
 	}
 
+	// Build response message with room features
+	response := fmt.Sprintf("Created room: #%s", roomName)
 	if password != "" {
-		return fmt.Sprintf("Created password-protected room: #%s", roomName), nil
+		response = fmt.Sprintf("Created password-protected room: #%s", roomName)
 	}
-	return fmt.Sprintf("Created room: #%s", roomName), nil
+	if maxParticipants != nil {
+		response += fmt.Sprintf(" (max %d participants)", *maxParticipants)
+	}
+	if expiresAt != nil {
+		response += fmt.Sprintf(" (expires at %s)", expiresAt.Format("2006-01-02 15:04"))
+	}
+	return response, nil
 }
 
 func handleLeave(user *models.User, args []string) (string, error) {
