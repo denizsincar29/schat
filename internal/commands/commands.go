@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -128,8 +129,8 @@ func init() {
 	registerCommand(&Command{
 		Name:        "users",
 		Aliases:     []string{"who", "list"},
-		Description: "List users in current room",
-		Usage:       "/users",
+		Description: "List users in current room or specified room",
+		Usage:       "/users [#room_name or .]",
 		Handler:     handleUsers,
 	})
 
@@ -359,8 +360,28 @@ func init() {
 }
 
 func registerCommand(cmd *Command) {
+	// Check if the command name is already registered
+	if existing, ok := Commands[cmd.Name]; ok {
+		log.Printf("WARNING: Command '%s' is already registered. Skipping duplicate registration.", cmd.Name)
+		log.Printf("  Existing: %s", existing.Description)
+		log.Printf("  New: %s", cmd.Description)
+		return
+	}
+	
 	Commands[cmd.Name] = cmd
+	
+	// Register all aliases, checking for conflicts
 	for _, alias := range cmd.Aliases {
+		if existing, ok := Commands[alias]; ok {
+			// Check if this alias already points to this command (from a previous registration)
+			if existing.Name == cmd.Name {
+				continue // Already registered, skip
+			}
+			log.Printf("WARNING: Alias '%s' conflicts with existing command '%s'. Skipping alias.", alias, existing.Name)
+			log.Printf("  Existing command: %s - %s", existing.Name, existing.Description)
+			log.Printf("  New command: %s - %s", cmd.Name, cmd.Description)
+			continue
+		}
 		Commands[alias] = cmd
 	}
 }
@@ -836,17 +857,60 @@ func handleStatus(user *models.User, args []string) (string, error) {
 }
 
 func handleUsers(user *models.User, args []string) (string, error) {
-	if user.CurrentRoomID == nil {
-		return "", fmt.Errorf("you are not in a room")
+	var roomID *uint
+	var roomName string
+	
+	// Parse arguments to determine which room to query
+	if len(args) > 0 {
+		roomArg := args[0]
+		
+		// Handle "." as current room
+		if roomArg == "." {
+			if user.CurrentRoomID == nil {
+				return "", fmt.Errorf("you are not in a room")
+			}
+			roomID = user.CurrentRoomID
+		} else {
+			// Strip # prefix if present
+			roomArg = stripPrefixes(roomArg)
+			
+			// Find the room by name
+			var room models.Room
+			if err := database.DB.Where("name = ?", roomArg).First(&room).Error; err != nil {
+				return "", fmt.Errorf("room not found: %s", roomArg)
+			}
+			roomID = &room.ID
+			roomName = room.Name
+		}
+	} else {
+		// No arguments - use current room
+		if user.CurrentRoomID == nil {
+			return "", fmt.Errorf("you are not in a room")
+		}
+		roomID = user.CurrentRoomID
+	}
+	
+	// Get room name if not already set
+	if roomName == "" {
+		var room models.Room
+		if err := database.DB.First(&room, *roomID).Error; err == nil {
+			roomName = room.Name
+		}
 	}
 
+	// Fetch users in the specified room
 	var users []models.User
-	if err := database.DB.Where("current_room_id = ?", user.CurrentRoomID).Find(&users).Error; err != nil {
+	if err := database.DB.Where("current_room_id = ?", roomID).Find(&users).Error; err != nil {
 		return "", fmt.Errorf("failed to fetch users: %w", err)
 	}
 
 	var result strings.Builder
-	result.WriteString("Users in this room:\n")
+	if roomName != "" {
+		result.WriteString(fmt.Sprintf("Users in #%s:\n", roomName))
+	} else {
+		result.WriteString("Users in this room:\n")
+	}
+	
 	for _, u := range users {
 		displayName := u.Username
 		if u.Nickname != "" {
@@ -860,6 +924,7 @@ func handleUsers(user *models.User, args []string) (string, error) {
 		}
 		result.WriteString(fmt.Sprintf("  %s\n", displayName))
 	}
+	
 	return result.String(), nil
 }
 
