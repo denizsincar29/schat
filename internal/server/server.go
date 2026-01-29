@@ -337,7 +337,7 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *s
 		select {
 		case <-setupDone:
 			// Setup complete, proceed
-		case <-time.After(200 * time.Millisecond):
+		case <-time.After(300 * time.Millisecond):
 			// Timeout, proceed anyway
 		}
 	case <-time.After(500 * time.Millisecond):
@@ -2125,9 +2125,9 @@ func cleanupExpiredRooms() {
 	for range ticker.C {
 		now := time.Now()
 
-		// Find expired rooms
+		// Find expired rooms (excluding permanent rooms)
 		var expiredRooms []models.Room
-		if err := database.DB.Where("expires_at IS NOT NULL AND expires_at <= ?", now).
+		if err := database.DB.Where("expires_at IS NOT NULL AND expires_at <= ? AND is_permanent = ?", now, false).
 			Find(&expiredRooms).Error; err != nil {
 			log.Printf("Error fetching expired rooms: %v", err)
 			continue
@@ -2148,6 +2148,8 @@ func cleanupExpiredRooms() {
 				continue
 			}
 
+			// Batch notify online users - acquire lock once
+			server.mutex.RLock()
 			for _, user := range users {
 				// Update user's room
 				user.CurrentRoomID = &generalRoom.ID
@@ -2157,14 +2159,13 @@ func cleanupExpiredRooms() {
 				}
 
 				// Notify user if they are online
-				server.mutex.RLock()
 				if client, ok := server.clients[user.ID]; ok {
 					client.Mutex.Lock()
 					client.Terminal.Write([]byte(fmt.Sprintf("\n*** Room #%s has expired. You have been moved to #general.\n", room.Name)))
 					client.Mutex.Unlock()
 				}
-				server.mutex.RUnlock()
 			}
+			server.mutex.RUnlock()
 
 			// Delete the expired room
 			if err := database.DB.Delete(&room).Error; err != nil {

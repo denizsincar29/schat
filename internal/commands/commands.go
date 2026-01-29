@@ -675,6 +675,9 @@ func handleCreate(user *models.User, args []string) (string, error) {
 			if err != nil || maxPart < 1 {
 				return "", fmt.Errorf("--max-participants must be a positive number")
 			}
+			if maxPart > 1000 {
+				return "", fmt.Errorf("--max-participants cannot exceed 1000")
+			}
 			maxParticipants = &maxPart
 			i += 2
 		} else if args[i] == "--expires-in" || args[i] == "--expires" {
@@ -685,8 +688,8 @@ func handleCreate(user *models.User, args []string) (string, error) {
 			if err != nil {
 				return "", fmt.Errorf("invalid duration format: %s (use format like 30m, 2h, 1h30m)", args[i+1])
 			}
-			if duration < time.Minute {
-				return "", fmt.Errorf("expiration time must be at least 1 minute")
+			if duration < 2*time.Minute {
+				return "", fmt.Errorf("expiration time must be at least 2 minutes")
 			}
 			expireTime := time.Now().Add(duration)
 			expiresAt = &expireTime
