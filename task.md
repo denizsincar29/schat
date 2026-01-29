@@ -1,30 +1,62 @@
-# Task
-Make an SSH chat application in go that support user registration and admins.
-
-## features
-- Seamless SSH connection handling
-- User registration and authentication via ssh keys or passwords
-- Admin roles with elevated privileges
- Commands have a few intuitive keywords if you forget the original name. Tab completion is also supported.
-- PostgreSQL database integration for storing user data and chat history
-- Real-time chat functionality
-- rooms support and broadcast messages and private messages
-- Banning users for specific duration, kicking users (from 2 minutes to 24 hours) and muting on specific duration. Duration is set with colon separated format.
-- Logging of all chat messages and user actions for audit purposes (pm logging is disabled by default but can be enabled by admin if he is a badass)
-- bell character on new message settings per user
-- User settings are stored in the database
-- @me command for emotes, with support of putting it in the middle of the message
-- nicknames and status messages
-- @mentions support with /mentiones command to list all mentions
-
-## Recommendations
-- crypto/ssh and gorm is already added to the go.mod file
-- Make the code well structured and modular for easy maintenance and scalability.
-- Screenreader support is priority! Don't make =======()()()()() etc for UI elements.
-- If it is possible by the ssh protocol, make keyboard shortcuts for needed actions like switching rooms, sending private messages, etc. They will preenter a special command in the input line when pressed.
-- when entered anonymously, the user needs to register. It asks for a username and (password / key). It detects if it's a key or password by the input format. The key input must be multiline I guess and it must stop reading when the user inputs a specific line like "END KEY" or something.
+You’re working on an SSH-based chat app with an interactive terminal UI (PTY + raw-ish input handling). Fix these two terminal bugs:
 
 
 
-## docker
-The app must be dockerized using docker compose. The setup.sh script must ask for needed environment variables and create a .env file for docker compose to use. The database must be in a separate container. The database container must have a volume for data persistence.
+1\. Broken newlines / paragraph alignment in server output
+
+&nbsp;  Symptoms: multi-line strings (welcome text, `/help` output, etc.) render with the next line starting at the previous line’s column (or otherwise “shifted”), and long lines get split oddly. This is typical when the PTY is put into raw mode (e.g., via `term.MakeRaw`) and `\\n` is no longer translated to `\\r\\n`.
+
+&nbsp;  Fix: ensure all server-to-client text output uses correct CRLF semantics. Centralize writes through a single helper/writer that:
+
+
+
+\* converts every `\\n` to `\\r\\n` (and avoids double-converting existing `\\r\\n`)
+
+\* ensures lines start at column 0 when appropriate (often by prefixing with `\\r` before printing new content)
+
+\* avoids interleaving output from concurrent goroutines (use a mutex or a single output goroutine)
+
+
+
+Also make sure printing command responses doesn’t corrupt the prompt/input line: clear the current input line, print output, then re-render the prompt + current input buffer.
+
+
+
+2\. Input editor hard-wraps at 80 columns
+
+&nbsp;  Symptoms: while the user is typing, their input is forcibly wrapped at 80 columns even if the terminal is wider (e.g., 120). Incoming messages don’t have this issue.
+
+&nbsp;  Fix: remove any hard-coded “80 columns” assumption in the line editor / wrapping logic. Use the actual PTY width for the session (from the SSH PTY/window size) and update it on resize (`window-change` requests). The input editor (cursor position, redraw, wrapping) must respect the current terminal width.
+
+
+
+Acceptance criteria:
+
+
+
+\* Welcome text and `/help` output render as clean multi-line paragraphs with correct line starts (no shifted paragraphs, no weird splits caused by missing `\\r`).
+
+\* While typing a long line in a wide terminal, the client does not receive hard-inserted line breaks at 80; wrapping matches the actual terminal width and behaves consistently across resizes.
+
+\* Prompt/input line remains intact after printing asynchronous chat messages or command output (no overwritten/misaligned prompt).
+
+
+
+Add minimal regression coverage where feasible (unit tests for newline normalization and width-based wrapping/redraw math, and/or a small manual test note).
+
+If this library for terminal you use needs a different approach to fix the bug, go as it's appropriate. I told you how to fix it from print / fmt perspective.
+
+
+
+Also, fix this bugs / implement features
+
+1\. fix command aliases / duplicates to not interfere with eachother.
+
+/users #roomname must view users in that room. In all commands, in the place of the room if you type "." it means that room that i am now. And where user, @me is me.  @everyone mentiones everyone.
+
+2\. if this feature needs terminal hacks, don't implement it. Make hotkeys for some commands, escape for exiting as well as ctrl+c, ctrl+backspace for deleting a word if this is not a terminal hack to implement, ctrl+tab to join the general room from somewhere else.
+
+3\. if not implemented, admins must receive join and leave alert for all users, even if not joined to the room the admin is currently. People must receive notifications that someone joined and left there room that they are currently in, not the room that he created.
+
+
+
