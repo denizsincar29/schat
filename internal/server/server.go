@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -125,6 +127,9 @@ func Run() error {
 
 	// Start background cleanup routine
 	go cleanupExpiredBansAndMutes()
+	
+	// Start broadcast scheduler
+	go broadcastScheduler()
 
 	// Accept connections
 	for {
@@ -269,7 +274,8 @@ func handleRegistration(channel ssh.Channel, username string) {
 	fmt.Fprintf(channel, "\r\nChoose authentication method:\r\n")
 	fmt.Fprintf(channel, "1. Password\r\n")
 	fmt.Fprintf(channel, "2. SSH Key\r\n")
-	terminal.SetPrompt("Enter choice (1 or 2): ")
+	fmt.Fprintf(channel, "Press Enter to join as guest (guests room only)\r\n")
+	terminal.SetPrompt("Enter choice (1, 2, or Enter for guest): ")
 
 	choice, err := terminal.ReadLine()
 	if err != nil {
@@ -277,6 +283,12 @@ func handleRegistration(channel ssh.Channel, username string) {
 		return
 	}
 	choice = strings.TrimSpace(choice)
+
+	// Guest access - empty choice
+	if choice == "" {
+		handleGuestUser(channel, username)
+		return
+	}
 
 	var password, sshKey string
 
@@ -319,13 +331,13 @@ func handleRegistration(channel ssh.Channel, username string) {
 			return
 		}
 	} else {
-		fmt.Fprintf(channel, "Invalid choice. Please enter 1 or 2.\r\n")
+		fmt.Fprintf(channel, "Invalid choice. Please enter 1, 2, or press Enter for guest access.\r\n")
 		return
 	}
 
 	// Check if this is the first user
 	var userCount int64
-	database.DB.Model(&models.User{}).Count(&userCount)
+	database.DB.Model(&models.User{}).Where("is_guest = ?", false).Count(&userCount)
 	isFirstUser := userCount == 0
 
 	// Create user - first user is automatically admin
@@ -348,6 +360,132 @@ func handleRegistration(channel ssh.Channel, username string) {
 	// Immediately authenticate and proceed to chat without reconnection
 	fmt.Fprintf(channel, "Connecting to chat...\r\n\r\n")
 	handleAuthenticatedUser(channel, newUser)
+}
+
+// handleGuestUser creates a temporary guest user and joins them to the guests room
+func handleGuestUser(channel ssh.Channel, username string) {
+	// Check if there's a banned guest with this nickname
+	var bannedGuest models.User
+	err := database.DB.Where("nickname = ? AND is_guest = ? AND is_banned = ? AND ban_expires_at > ?",
+		username, true, true, time.Now()).First(&bannedGuest).Error
+	
+	if err == nil {
+		// Found a banned guest with this nickname
+		fmt.Fprintf(channel, "\r\nYou are banned from guest access.\r\n")
+		if bannedGuest.BanExpiresAt != nil {
+			fmt.Fprintf(channel, "Ban expires: %s\r\n", bannedGuest.BanExpiresAt.Format("2006-01-02 15:04:05"))
+		}
+		return
+	}
+
+	// Get the guests room
+	var guestsRoom models.Room
+	if err := database.DB.Where("name = ?", "guests").First(&guestsRoom).Error; err != nil {
+		fmt.Fprintf(channel, "\r\nError: Guests room not found. Please contact an administrator.\r\n")
+		log.Printf("Guests room not found: %v", err)
+		return
+	}
+
+	// Create a unique guest username with timestamp to avoid collisions
+	guestUsername := fmt.Sprintf("guest_%s_%d", username, time.Now().UnixNano())
+	
+	// Create a temporary guest user
+	guestUser := &models.User{
+		Username:      guestUsername,
+		IsGuest:       true,
+		Nickname:      username,
+		CurrentRoomID: &guestsRoom.ID,
+		DefaultRoomID: &guestsRoom.ID,
+		LastSeenAt:    time.Now(),
+		BellEnabled:   false,
+	}
+
+	// Save guest user to database (temporary)
+	if err := database.DB.Create(guestUser).Error; err != nil {
+		fmt.Fprintf(channel, "\r\nError creating guest user: %v\r\n", err)
+		log.Printf("Error creating guest user: %v", err)
+		return
+	}
+
+	fmt.Fprintf(channel, "\r\nJoining as guest (guests room only)...\r\n\r\n")
+	
+	// Start guest session
+	handleGuestSession(channel, guestUser)
+}
+
+// handleGuestSession handles a guest user session (limited to guests room only)
+func handleGuestSession(channel ssh.Channel, user *models.User) {
+	// Update last seen
+	user.LastSeenAt = time.Now()
+	database.DB.Save(user)
+
+	// Start reading input using term.Terminal for proper echo handling
+	terminal := term.NewTerminal(channel, "> ")
+
+	// Add client to server
+	client := &Client{
+		User:     user,
+		Conn:     channel,
+		Terminal: terminal,
+		LastMsg:  time.Now(),
+	}
+	server.mutex.Lock()
+	server.clients[user.ID] = client
+	server.mutex.Unlock()
+
+	defer func() {
+		server.mutex.Lock()
+		delete(server.clients, user.ID)
+		server.mutex.Unlock()
+
+		// Delete guest user from database
+		database.DB.Unscoped().Delete(user)
+
+		logAction(user, "disconnect", "Guest disconnected")
+	}()
+
+	// Welcome message for guests
+	displayName := user.Nickname
+	if displayName == "" {
+		displayName = user.Username
+	}
+
+	fmt.Fprintf(channel, "\n")
+	fmt.Fprintf(channel, "Welcome to the guests room, %s!\n", displayName)
+	fmt.Fprintf(channel, "You are logged in as a guest (limited to guests room only).\n")
+	fmt.Fprintf(channel, "Type /help for available commands.\n")
+	fmt.Fprintf(channel, "\n")
+
+	// Show chat history for guests room
+	showChatHistory(channel, user)
+
+	// Broadcast join message
+	if user.CurrentRoomID != nil {
+		broadcastToRoom(*user.CurrentRoomID, fmt.Sprintf("*** %s (guest) has joined the chat", displayName), user.ID)
+	}
+
+	logAction(user, "guest_connect", "Guest connected")
+
+	// Main message loop (same as regular users but restricted)
+	for {
+		line, err := terminal.ReadLine()
+		if err != nil {
+			break
+		}
+
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// Handle commands (restricted for guests)
+		if strings.HasPrefix(line, "/") {
+			handleGuestCommand(client, line)
+		} else {
+			// Regular message - only in guests room
+			handleGuestMessage(client, line)
+		}
+	}
 }
 
 func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
@@ -387,11 +525,27 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 		logAction(user, "disconnect", "User disconnected")
 	}()
 
-	// Join default room
+	// Join default room - use user's default room if set, otherwise use general
 	var defaultRoom models.Room
-	if err := database.DB.Where("name = ?", "general").First(&defaultRoom).Error; err == nil {
-		user.CurrentRoomID = &defaultRoom.ID
-		database.DB.Save(user)
+	if user.DefaultRoomID != nil {
+		// User has a preferred default room
+		if err := database.DB.First(&defaultRoom, *user.DefaultRoomID).Error; err == nil {
+			user.CurrentRoomID = &defaultRoom.ID
+			database.DB.Save(user)
+		} else {
+			// Default room doesn't exist, fall back to general
+			if err := database.DB.Where("name = ?", "general").First(&defaultRoom).Error; err == nil {
+				user.CurrentRoomID = &defaultRoom.ID
+				database.DB.Save(user)
+			}
+		}
+	} else {
+		// No default room set, use general
+		if err := database.DB.Where("name = ?", "general").First(&defaultRoom).Error; err == nil {
+			user.CurrentRoomID = &defaultRoom.ID
+			user.DefaultRoomID = &defaultRoom.ID // Set it as default for next time
+			database.DB.Save(user)
+		}
 	}
 
 	// Welcome message
@@ -623,6 +777,26 @@ func handleCommand(client *Client, line string) {
 	// Special handling for /qr command to generate QR codes
 	if cmdName == "qr" {
 		handleQRCode(client, args)
+		return
+	}
+
+	// Special handling for /signup command which requires interactive input
+	if cmdName == "signup" || cmdName == "register" {
+		if !client.User.IsGuest {
+			fmt.Fprintf(client.Conn, "This command is only available for guest users\n")
+			return
+		}
+		handleSignupInteractive(client)
+		return
+	}
+
+	// Special handling for /broadcast command which requires interactive input
+	if cmdName == "broadcast" || cmdName == "schedulebroadcast" || cmdName == "announce" {
+		if !client.User.IsAdmin {
+			fmt.Fprintf(client.Conn, "This command requires admin privileges\n")
+			return
+		}
+		handleBroadcastInteractive(client)
 		return
 	}
 
@@ -968,6 +1142,291 @@ func qrCodeToUnicode(qr *qrcode.QRCode) string {
 	return result.String()
 }
 
+// handleBroadcastInteractive handles the interactive broadcast scheduling
+func handleBroadcastInteractive(client *Client) {
+	fmt.Fprintf(client.Conn, "\n=== Schedule Broadcast Message ===\n\n")
+	
+	originalPrompt := "> "
+	
+	// Get base time
+	client.Terminal.SetPrompt("Enter base time (YYYY-MM-DD HH:MM): ")
+	baseTimeStr, err := client.Terminal.ReadLine()
+	if err != nil {
+		fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+	baseTimeStr = strings.TrimSpace(baseTimeStr)
+	
+	// Parse base time
+	baseTime, err := time.Parse("2006-01-02 15:04", baseTimeStr)
+	if err != nil {
+		fmt.Fprintf(client.Conn, "\nInvalid time format. Please use: YYYY-MM-DD HH:MM\n")
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+	
+	// Ensure base time is in the future
+	if baseTime.Before(time.Now()) {
+		fmt.Fprintf(client.Conn, "\nBase time must be in the future.\n")
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+	
+	// Get base time message
+	client.Terminal.SetPrompt("Enter message for base time: ")
+	baseMessage, err := client.Terminal.ReadLine()
+	if err != nil {
+		fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+	baseMessage = strings.TrimSpace(baseMessage)
+	
+	if baseMessage == "" {
+		fmt.Fprintf(client.Conn, "\nMessage cannot be empty.\n")
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+	
+	// Create base time broadcast
+	baseBroadcast := models.BroadcastMessage{
+		CreatorID:    client.User.ID,
+		BaseTime:     baseTime,
+		BaseMessage:  baseMessage,
+		ScheduledAt:  baseTime,
+		Message:      baseMessage,
+		MinuteOffset: 0,
+		IsSent:       false,
+	}
+	
+	var broadcasts []models.BroadcastMessage
+	broadcasts = append(broadcasts, baseBroadcast)
+	
+	// Ask for reminders
+	fmt.Fprintf(client.Conn, "\n")
+	for {
+		client.Terminal.SetPrompt("Add a reminder? (y/n): ")
+		addReminder, err := client.Terminal.ReadLine()
+		if err != nil {
+			fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+			client.Terminal.SetPrompt(originalPrompt)
+			return
+		}
+		addReminder = strings.ToLower(strings.TrimSpace(addReminder))
+		
+		if addReminder != "y" && addReminder != "yes" {
+			break
+		}
+		
+		// Get offset
+		client.Terminal.SetPrompt("Enter minutes offset (negative for before, positive for after): ")
+		offsetStr, err := client.Terminal.ReadLine()
+		if err != nil {
+			fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+			client.Terminal.SetPrompt(originalPrompt)
+			return
+		}
+		offsetStr = strings.TrimSpace(offsetStr)
+		
+		offset, err := strconv.Atoi(offsetStr)
+		if err != nil {
+			fmt.Fprintf(client.Conn, "\nInvalid offset. Please enter a number.\n")
+			continue
+		}
+		
+		// Get reminder message
+		client.Terminal.SetPrompt("Enter reminder message: ")
+		reminderMsg, err := client.Terminal.ReadLine()
+		if err != nil {
+			fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+			client.Terminal.SetPrompt(originalPrompt)
+			return
+		}
+		reminderMsg = strings.TrimSpace(reminderMsg)
+		
+		if reminderMsg == "" {
+			fmt.Fprintf(client.Conn, "\nMessage cannot be empty.\n")
+			continue
+		}
+		
+		// Calculate scheduled time
+		scheduledAt := baseTime.Add(time.Duration(offset) * time.Minute)
+		
+		// Ensure scheduled time is in the future
+		if scheduledAt.Before(time.Now()) {
+			fmt.Fprintf(client.Conn, "\nScheduled time would be in the past. Skipping.\n")
+			continue
+		}
+		
+		reminder := models.BroadcastMessage{
+			CreatorID:    client.User.ID,
+			BaseTime:     baseTime,
+			BaseMessage:  baseMessage,
+			ScheduledAt:  scheduledAt,
+			Message:      reminderMsg,
+			MinuteOffset: offset,
+			IsSent:       false,
+		}
+		
+		broadcasts = append(broadcasts, reminder)
+		fmt.Fprintf(client.Conn, "Reminder added for %s\n", scheduledAt.Format("2006-01-02 15:04:05"))
+	}
+	
+	// Save all broadcasts
+	for _, broadcast := range broadcasts {
+		if err := database.DB.Create(&broadcast).Error; err != nil {
+			fmt.Fprintf(client.Conn, "\nError saving broadcast: %v\n", err)
+			client.Terminal.SetPrompt(originalPrompt)
+			return
+		}
+	}
+	
+	fmt.Fprintf(client.Conn, "\nBroadcast scheduled successfully!\n")
+	fmt.Fprintf(client.Conn, "Base time: %s\n", baseTime.Format("2006-01-02 15:04:05"))
+	fmt.Fprintf(client.Conn, "Total messages: %d\n\n", len(broadcasts))
+	
+	client.Terminal.SetPrompt(originalPrompt)
+	
+	logAction(client.User, "schedule_broadcast", fmt.Sprintf("Scheduled %d broadcast message(s)", len(broadcasts)))
+}
+
+// handleSignupInteractive converts a guest user to a full user account
+func handleSignupInteractive(client *Client) {
+	fmt.Fprintf(client.Conn, "\n=== Convert Guest to Full Account ===\n\n")
+	fmt.Fprintf(client.Conn, "You are currently logged in as guest: %s\n", client.User.Nickname)
+	fmt.Fprintf(client.Conn, "Let's create a permanent account for you.\n\n")
+	
+	originalPrompt := "> "
+	
+	// Get desired username
+	client.Terminal.SetPrompt("Enter your desired username: ")
+	username, err := client.Terminal.ReadLine()
+	if err != nil {
+		fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+	username = strings.TrimSpace(username)
+	
+	if username == "" {
+		fmt.Fprintf(client.Conn, "\nUsername cannot be empty.\n")
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+	
+	// Check if username already exists
+	var existingUser models.User
+	if err := database.DB.Where("username = ?", username).First(&existingUser).Error; err == nil {
+		fmt.Fprintf(client.Conn, "\nUsername '%s' is already taken. Please try another.\n", username)
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+	
+	// Choose authentication method
+	fmt.Fprintf(client.Conn, "\nChoose authentication method:\n")
+	fmt.Fprintf(client.Conn, "1. Password\n")
+	fmt.Fprintf(client.Conn, "2. SSH Key\n")
+	client.Terminal.SetPrompt("Enter choice (1 or 2): ")
+	
+	choice, err := client.Terminal.ReadLine()
+	if err != nil {
+		fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+	choice = strings.TrimSpace(choice)
+	
+	var password, sshKey string
+	
+	if choice == "1" {
+		client.Terminal.SetPrompt("\r\nEnter password (visible): ")
+		line, err := client.Terminal.ReadLine()
+		if err != nil {
+			fmt.Fprintf(client.Conn, "\r\nError reading input: %v\r\n", err)
+			client.Terminal.SetPrompt(originalPrompt)
+			return
+		}
+		password = strings.TrimSpace(line)
+		
+		if password == "" {
+			fmt.Fprintf(client.Conn, "Password cannot be empty\r\n")
+			client.Terminal.SetPrompt(originalPrompt)
+			return
+		}
+	} else if choice == "2" {
+		fmt.Fprintf(client.Conn, "\r\nPaste your SSH public key (end with a line containing only 'END'):\r\n")
+		client.Terminal.SetPrompt("")
+		var keyLines []string
+		for {
+			line, err := client.Terminal.ReadLine()
+			if err != nil {
+				fmt.Fprintf(client.Conn, "\r\nError reading input: %v\r\n", err)
+				client.Terminal.SetPrompt(originalPrompt)
+				return
+			}
+			line = strings.TrimSpace(line)
+			if line == "END" {
+				break
+			}
+			if line != "" {
+				keyLines = append(keyLines, line)
+			}
+		}
+		sshKey = strings.Join(keyLines, " ")
+		
+		if sshKey == "" {
+			fmt.Fprintf(client.Conn, "SSH key cannot be empty\r\n")
+			client.Terminal.SetPrompt(originalPrompt)
+			return
+		}
+	} else {
+		fmt.Fprintf(client.Conn, "Invalid choice. Please enter 1 or 2.\r\n")
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+	
+	// Update the guest user to become a full user
+	client.User.Username = username
+	client.User.IsGuest = false
+	
+	if password != "" {
+		hashedPassword, err := auth.HashPassword(password)
+		if err != nil {
+			fmt.Fprintf(client.Conn, "\r\nFailed to hash password: %v\r\n", err)
+			client.Terminal.SetPrompt(originalPrompt)
+			return
+		}
+		client.User.PasswordHash = hashedPassword
+	}
+	
+	if sshKey != "" {
+		// Validate SSH key format
+		_, _, _, _, err := ssh.ParseAuthorizedKey([]byte(sshKey))
+		if err != nil {
+			fmt.Fprintf(client.Conn, "\r\nInvalid SSH key format: %v\r\n", err)
+			client.Terminal.SetPrompt(originalPrompt)
+			return
+		}
+		client.User.SSHKey = sshKey
+	}
+	
+	// Save the updated user
+	if err := database.DB.Save(client.User).Error; err != nil {
+		fmt.Fprintf(client.Conn, "\r\nFailed to create account: %v\r\n", err)
+		client.Terminal.SetPrompt(originalPrompt)
+		return
+	}
+	
+	fmt.Fprintf(client.Conn, "\r\nAccount created successfully!\r\n")
+	fmt.Fprintf(client.Conn, "You are now a full user: %s\r\n", username)
+	fmt.Fprintf(client.Conn, "You can now access all rooms and features.\r\n\n")
+	
+	client.Terminal.SetPrompt(originalPrompt)
+	
+	logAction(client.User, "signup", fmt.Sprintf("Guest %s converted to user %s", client.User.Nickname, username))
+}
+
 func handleMessage(client *Client, message string) {
 	// Check if user is in a room
 	if client.User.CurrentRoomID == nil {
@@ -1006,6 +1465,12 @@ func handleMessage(client *Client, message string) {
 		Content: message,
 	}
 	database.DB.Create(&chatMsg)
+
+	// Update room activity timestamp
+	if client.User.CurrentRoomID != nil {
+		database.DB.Model(&models.Room{}).Where("id = ?", *client.User.CurrentRoomID).
+			Update("last_activity_at", time.Now())
+	}
 
 	// Check for mentions
 	words := strings.Fields(message)
@@ -1063,6 +1528,153 @@ func handleMessage(client *Client, message string) {
 	broadcastToRoom(*client.User.CurrentRoomID, formattedMsg, client.User.ID)
 
 	logAction(client.User, "message", fmt.Sprintf("Sent message in room %d", *client.User.CurrentRoomID))
+}
+
+// handleGuestMessage handles messages from guest users (restricted to guests room)
+func handleGuestMessage(client *Client, message string) {
+	// Guest users can only send messages in the guests room
+	if client.User.CurrentRoomID == nil {
+		fmt.Fprintf(client.Conn, "Error: You are not in a room.\n")
+		return
+	}
+
+	// Verify they are in the guests room
+	var currentRoom models.Room
+	if err := database.DB.First(&currentRoom, *client.User.CurrentRoomID).Error; err != nil {
+		fmt.Fprintf(client.Conn, "Error: Could not verify current room.\n")
+		return
+	}
+
+	if currentRoom.Name != "guests" {
+		fmt.Fprintf(client.Conn, "Error: Guests can only chat in the guests room.\n")
+		return
+	}
+
+	// Process message
+	displayName := client.User.Nickname
+	if displayName == "" {
+		displayName = client.User.Username
+	}
+
+	formattedMsg := fmt.Sprintf("%s (guest): %s", displayName, message)
+
+	// Save message to database
+	chatMsg := models.ChatMessage{
+		UserID:  client.User.ID,
+		RoomID:  client.User.CurrentRoomID,
+		Content: message,
+	}
+	database.DB.Create(&chatMsg)
+
+	// Update room activity
+	currentRoom.LastActivityAt = time.Now()
+	database.DB.Save(&currentRoom)
+
+	// Broadcast message to room
+	broadcastToRoom(*client.User.CurrentRoomID, formattedMsg, client.User.ID)
+
+	logAction(client.User, "guest_message", fmt.Sprintf("Guest sent message in room %d", *client.User.CurrentRoomID))
+}
+
+// handleGuestCommand handles commands from guest users (restricted subset)
+func handleGuestCommand(client *Client, line string) {
+	parts := strings.Fields(line[1:]) // Remove leading /
+	if len(parts) == 0 {
+		return
+	}
+
+	cmdName := strings.ToLower(parts[0])
+	args := parts[1:]
+
+	// Only allow specific commands for guests
+	allowedCommands := map[string]bool{
+		"help":  true,
+		"h":     true,
+		"?":     true,
+		"users": true,
+		"me":    true,
+	}
+
+	if !allowedCommands[cmdName] {
+		fmt.Fprintf(client.Conn, "Command not available for guests. Type /help for available commands.\n")
+		return
+	}
+
+	// Handle help specially for guests
+	if cmdName == "help" || cmdName == "h" || cmdName == "?" {
+		fmt.Fprintf(client.Conn, "\nAvailable commands for guests:\n")
+		fmt.Fprintf(client.Conn, "  /help          - Show this help message\n")
+		fmt.Fprintf(client.Conn, "  /users         - List users in the guests room\n")
+		fmt.Fprintf(client.Conn, "  /me <action>   - Send an emote\n")
+		fmt.Fprintf(client.Conn, "\nTo get full access, please register an account.\n\n")
+		return
+	}
+
+	// Handle /me emote
+	if cmdName == "me" {
+		if len(args) == 0 {
+			fmt.Fprintf(client.Conn, "Usage: /me <action>\n")
+			return
+		}
+		action := strings.Join(args, " ")
+		displayName := client.User.Nickname
+		if displayName == "" {
+			displayName = client.User.Username
+		}
+		message := fmt.Sprintf("* %s (guest) %s", displayName, action)
+		
+		// Save to database
+		chatMsg := models.ChatMessage{
+			UserID:  client.User.ID,
+			RoomID:  client.User.CurrentRoomID,
+			Content: action,
+		}
+		database.DB.Create(&chatMsg)
+		
+		// Update room activity timestamp
+		if client.User.CurrentRoomID != nil {
+			database.DB.Model(&models.Room{}).Where("id = ?", *client.User.CurrentRoomID).
+				Update("last_activity_at", time.Now())
+		}
+		
+		// Broadcast
+		if client.User.CurrentRoomID != nil {
+			broadcastToRoom(*client.User.CurrentRoomID, message, client.User.ID)
+		}
+		return
+	}
+
+	// Handle /users
+	if cmdName == "users" {
+		if client.User.CurrentRoomID == nil {
+			fmt.Fprintf(client.Conn, "You are not in a room.\n")
+			return
+		}
+
+		// Get users in current room
+		var users []models.User
+		database.DB.Where("current_room_id = ?", *client.User.CurrentRoomID).Find(&users)
+
+		if len(users) == 0 {
+			fmt.Fprintf(client.Conn, "No users in this room.\n")
+			return
+		}
+
+		fmt.Fprintf(client.Conn, "\nUsers in guests room:\n")
+		for _, u := range users {
+			displayName := u.Username
+			if u.Nickname != "" {
+				displayName = u.Nickname
+			}
+			guestTag := ""
+			if u.IsGuest {
+				guestTag = " (guest)"
+			}
+			fmt.Fprintf(client.Conn, "  - %s%s\n", displayName, guestTag)
+		}
+		fmt.Fprintf(client.Conn, "\n")
+		return
+	}
 }
 
 func broadcastToRoom(roomID uint, message string, excludeUserID uint) {
@@ -1236,6 +1848,78 @@ func cleanupExpiredBansAndMutes() {
 		database.DB.Model(&models.Mute{}).
 			Where("is_active = ? AND expires_at < ?", true, now).
 			Update("is_active", false)
+	}
+}
+
+// broadcastScheduler checks for scheduled broadcasts and sends them
+func broadcastScheduler() {
+	ticker := time.NewTicker(30 * time.Second) // Check every 30 seconds
+	defer ticker.Stop()
+
+	for range ticker.C {
+		now := time.Now()
+
+		// Find broadcasts that are due and not yet sent
+		// Use a transaction to prevent race conditions
+		var broadcasts []models.BroadcastMessage
+		err := database.DB.Transaction(func(tx *gorm.DB) error {
+			// Lock rows for update
+			if err := tx.Where("is_sent = ? AND scheduled_at <= ?", false, now).
+				Clauses(clause.Locking{Strength: "UPDATE"}).
+				Find(&broadcasts).Error; err != nil {
+				return err
+			}
+
+			// Mark them as sent immediately to prevent duplicate sends
+			if len(broadcasts) > 0 {
+				var ids []uint
+				for _, b := range broadcasts {
+					ids = append(ids, b.ID)
+				}
+				if err := tx.Model(&models.BroadcastMessage{}).
+					Where("id IN ?", ids).
+					Update("is_sent", true).Error; err != nil {
+					return err
+				}
+			}
+
+			return nil
+		})
+
+		if err != nil {
+			log.Printf("Error fetching broadcasts: %v", err)
+			continue
+		}
+
+		if len(broadcasts) == 0 {
+			continue
+		}
+
+		// Check if there are any users online
+		server.mutex.RLock()
+		userCount := len(server.clients)
+		server.mutex.RUnlock()
+
+		if userCount == 0 {
+			log.Printf("Skipping %d broadcast(s) - no users online", len(broadcasts))
+			// Broadcasts remain marked as sent - they won't be retried
+			continue
+		}
+
+		// Send broadcasts to all users
+		for _, broadcast := range broadcasts {
+			message := fmt.Sprintf("\n*** BROADCAST *** %s\n", broadcast.Message)
+			
+			server.mutex.RLock()
+			for _, client := range server.clients {
+				client.Mutex.Lock()
+				client.Terminal.Write([]byte(message))
+				client.Mutex.Unlock()
+			}
+			server.mutex.RUnlock()
+
+			log.Printf("Sent broadcast %d to %d users", broadcast.ID, userCount)
+		}
 	}
 }
 

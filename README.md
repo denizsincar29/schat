@@ -5,21 +5,27 @@ A feature-rich SSH-based chat application written in Go with support for user re
 ## Features
 
 - **Seamless SSH Connection Handling**: Connect via SSH with password or key-based authentication
+- **Guest Access**: Join the chat as a guest without registration (guests room only)
 - **User Registration**: Easy registration process via SSH - no reconnection needed after registration
+- **Default Rooms**: Each user has a default room they join on login
+- **Preserved Rooms**: Special rooms (general, guests, dev) that are always available
 - **Admin Roles**: Elevated privileges for administrators (first user is auto-admin)
 - **Admin Management**: Promote/demote users and manage the admin team
 - **Tab Completion**: Smart autocomplete for commands, usernames (with @ prefix), and room names
 - **Real-time Chat**: Instant messaging with other users
 - **Chat History**: See last 10 messages when connecting to chat
 - **Room Support**: Create and join multiple chat rooms
+- **Inactivity Tracking**: Check how long a room has been inactive
 - **Private Messages**: Direct messaging between users (can send to offline users)
 - **Mentions**: @mention users and get notifications (can mention offline users)
 - **Offline Notifications**: Get notified about missed mentions and private messages
 - **Admin Mentions**: @admin mentions all administrators
 - **User Profiles**: Nicknames and status messages
 - **Moderation Tools**: Ban, kick, and mute users with duration control
+- **Guest Moderation**: Ban guests by username or fingerprint
 - **User Management**: Admins can delete users
 - **User Reports**: Report users to admins with /report command
+- **Broadcast System**: Admins can schedule broadcast messages with reminders
 - **Emotes**: Express yourself with /me commands
 - **Audit Logging**: Track all user actions and messages
 - **Bell Notifications**: Optional sound notifications for mentions
@@ -42,13 +48,16 @@ A feature-rich SSH-based chat application written in Go with support for user re
 - `/addkey [pp] [mr]` - Add SSH key (replaces password unless `pp` flag is used; use `mr` for machine-readable output)
 - `/qr <text or URL>` - Generate and send a QR code to the chat
 - `/report @username <reason>` - Report a user to admins
+- `/setdefault [#room_name]` - Set or view your default room
+- `/inactive [#room_name]` - Check inactivity time for current or specified room
+- `/signup` - Convert guest account to full user account (guests only)
 
 ### Admin Commands
 
-- `/ban @username <duration> [reason]` - Ban a user
+- `/ban @username <duration> [reason]` - Ban a user or guest
 - `/kick @username <duration> [reason]` - Kick a user
 - `/mute @username <duration> [reason]` - Mute a user
-- `/unban @username` - Unban a user
+- `/unban @username` - Unban a user or guest
 - `/unmute @username` - Unmute a user
 - `/promote @username` - Promote a user to admin
 - `/demote @username` - Remove admin privileges from a user
@@ -56,8 +65,13 @@ A feature-rich SSH-based chat application written in Go with support for user re
 - `/admins` - List all admins (available to all users)
 - `/reports` - View user reports
 - `/markreports` - Mark all reports as read
+- `/broadcast` - Schedule a broadcast message with reminders (interactive)
+- `/broadcasts` - List scheduled broadcast messages
+- `/cancelbroadcast <id>` - Cancel a scheduled broadcast
 
 Duration format: `5m`, `2h`, `1:30` (MM:SS), or `1:30:00` (HH:MM:SS)
+
+**Note**: The `/ban` and `/unban` commands now work for both regular users and guests. Use the guest's nickname to ban them.
 
 ## Setup with Docker
 
@@ -161,7 +175,27 @@ The automated key addition saves you from manually pasting the key!
 ssh -p 2222 -o PreferredAuthentications=keyboard-interactive newusername@localhost
 ```
 
-You'll be prompted to choose between password or SSH key authentication. After registration, you are automatically connected to the chat!
+You'll be prompted to choose between password or SSH key authentication, or press Enter to join as a guest. After registration, you are automatically connected to the chat!
+
+**Guest Access:**
+```bash
+# Connect with keyboard-interactive auth
+ssh -p 2222 -o PreferredAuthentications=keyboard-interactive guestname@localhost
+```
+
+When prompted for authentication method, simply press Enter to join as a guest. Guest users:
+- Can only access the "guests" room
+- Cannot join other rooms or send private messages
+- Are automatically removed when they disconnect
+- Can be banned by admins using the `/ban` command (same as regular users)
+- Can convert to full user accounts using the `/signup` command
+
+To convert a guest account to a full user account, use the `/signup` command while logged in as a guest. You'll be prompted to:
+1. Choose a permanent username
+2. Select authentication method (password or SSH key)
+3. Set up your credentials
+
+After signup, you'll have access to all rooms and features.
 
 **Login (existing users):**
 ```bash
@@ -233,14 +267,39 @@ Configuration is done via environment variables:
 ## Database Schema
 
 The application uses the following tables:
-- `users` - User accounts and settings
-- `rooms` - Chat rooms
+- `users` - User accounts and settings (includes default room preferences and guest flags)
+- `rooms` - Chat rooms (includes inactivity tracking)
 - `chat_messages` - Chat message history
-- `bans` - User ban records
+- `bans` - User and guest ban records (unified)
 - `mutes` - User mute records
 - `mentions` - User mention tracking
+- `broadcast_messages` - Scheduled broadcast messages
 - `audit_logs` - Action logging
 - `settings` - Global settings
+
+## Special Rooms
+
+The application creates three preserved rooms by default:
+- **general** - The default room for all users
+- **guests** - Public room accessible to guest users without registration
+- **dev** - Hidden room for development (only visible to admins)
+
+Users can set their preferred default room using the `/setdefault` command.
+
+## Broadcast System
+
+Admins can schedule broadcast messages with multiple reminders using the `/broadcast` command:
+
+1. Enter the base time (event time) in format: YYYY-MM-DD HH:MM
+2. Enter the message for the base time
+3. Add reminders with minute offsets (negative = before, positive = after)
+4. Each reminder gets its own custom message
+
+Broadcasts are automatically sent when:
+- The scheduled time arrives
+- At least one user is online
+
+Example use case: Announcing a server maintenance at 17:00, with reminders at 15 and 5 minutes before.
 
 ## Admin Setup
 
