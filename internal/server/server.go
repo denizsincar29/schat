@@ -36,11 +36,21 @@ const (
 )
 
 type Client struct {
-	User     *models.User
-	Conn     ssh.Channel
-	Terminal *term.Terminal
-	Mutex    sync.Mutex
-	LastMsg  time.Time
+	User       *models.User
+	Conn       ssh.Channel
+	Terminal   *term.Terminal
+	Mutex      sync.Mutex
+	LastMsg    time.Time
+	TermWidth  int // Terminal width in columns
+	TermHeight int // Terminal height in rows
+}
+
+// sessionContext holds PTY dimensions and client reference for window-change updates
+type sessionContext struct {
+	width  int
+	height int
+	client *Client
+	mu     sync.Mutex
 }
 
 type Server struct {
@@ -53,6 +63,52 @@ var server *Server
 func init() {
 	server = &Server{
 		clients: make(map[uint]*Client),
+	}
+}
+
+// normalizeNewlines converts all \n to \r\n and ensures we don't double-convert
+// existing \r\n sequences. This is necessary for proper terminal display when
+// the PTY is in raw mode.
+func normalizeNewlines(s string) string {
+	// Replace all \r\n with placeholder to avoid double-conversion
+	s = strings.ReplaceAll(s, "\r\n", "\x00")
+	// Replace all remaining \n with \r\n
+	s = strings.ReplaceAll(s, "\n", "\r\n")
+	// Restore the placeholder back to \r\n
+	s = strings.ReplaceAll(s, "\x00", "\r\n")
+	return s
+}
+
+// normalizingWriter wraps an io.Writer to automatically convert \n to \r\n
+type normalizingWriter struct {
+	w io.Writer
+}
+
+func (nw *normalizingWriter) Write(p []byte) (n int, err error) {
+	normalized := normalizeNewlines(string(p))
+	_, err = nw.w.Write([]byte(normalized))
+	if err != nil {
+		return 0, err
+	}
+	// Return original length to maintain Write contract
+	return len(p), nil
+}
+
+// normalizedChannel wraps ssh.Channel to normalize all Write operations
+type normalizedChannel struct {
+	ssh.Channel
+	normalizedWriter io.Writer
+}
+
+func (nc *normalizedChannel) Write(data []byte) (n int, err error) {
+	return nc.normalizedWriter.Write(data)
+}
+
+// wrapChannel wraps an ssh.Channel with automatic newline normalization
+func wrapChannel(channel ssh.Channel) ssh.Channel {
+	return &normalizedChannel{
+		Channel:          channel,
+		normalizedWriter: &normalizingWriter{w: channel},
 	}
 }
 
@@ -176,8 +232,17 @@ func handleConnection(netConn net.Conn, config *ssh.ServerConfig) {
 func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *ssh.ServerConn) {
 	defer channel.Close()
 
+	// Wrap channel for normalized output (converts \n to \r\n)
+	normalizedChan := wrapChannel(channel)
+
 	// Channel to signal when PTY/shell setup is complete
 	setupDone := make(chan bool, 1)
+	
+	// Session context to track PTY dimensions and client reference
+	ctx := &sessionContext{
+		width:  80, // Default width
+		height: 24, // Default height
+	}
 
 	// Handle session requests
 	go func() {
@@ -185,7 +250,27 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *s
 		for req := range requests {
 			switch req.Type {
 			case "pty-req":
-				// Accept PTY request - client will handle terminal modes
+				// Parse PTY request to extract terminal dimensions
+				if len(req.Payload) >= 8 {
+					// PTY request format: string term, uint32 columns, uint32 rows, uint32 width_px, uint32 height_px, string modes
+					// Skip the term string length (4 bytes) and the term string itself
+					termLen := int(req.Payload[3])
+					offset := 4 + termLen
+					if len(req.Payload) >= offset+8 {
+						ctx.mu.Lock()
+						// Parse columns (uint32, big-endian)
+						ctx.width = int(uint32(req.Payload[offset])<<24 | 
+							uint32(req.Payload[offset+1])<<16 |
+							uint32(req.Payload[offset+2])<<8 | 
+							uint32(req.Payload[offset+3]))
+						// Parse rows (uint32, big-endian)
+						ctx.height = int(uint32(req.Payload[offset+4])<<24 | 
+							uint32(req.Payload[offset+5])<<16 |
+							uint32(req.Payload[offset+6])<<8 | 
+							uint32(req.Payload[offset+7]))
+						ctx.mu.Unlock()
+					}
+				}
 				req.Reply(true, nil)
 			case "shell":
 				shellReceived = true
@@ -196,7 +281,31 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *s
 				default:
 				}
 			case "window-change":
-				// Accept window size changes
+				// Parse window-change request to extract new dimensions
+				if len(req.Payload) >= 8 {
+					newWidth := int(uint32(req.Payload[0])<<24 | 
+						uint32(req.Payload[1])<<16 |
+						uint32(req.Payload[2])<<8 | 
+						uint32(req.Payload[3]))
+					newHeight := int(uint32(req.Payload[4])<<24 | 
+						uint32(req.Payload[5])<<16 |
+						uint32(req.Payload[6])<<8 | 
+						uint32(req.Payload[7]))
+					
+					ctx.mu.Lock()
+					ctx.width = newWidth
+					ctx.height = newHeight
+					// Update the terminal if client exists
+					if ctx.client != nil {
+						ctx.client.Mutex.Lock()
+						ctx.client.TermWidth = newWidth
+						ctx.client.TermHeight = newHeight
+						// Update term.Terminal's internal width for proper line wrapping
+						ctx.client.Terminal.SetSize(newWidth, newHeight)
+						ctx.client.Mutex.Unlock()
+					}
+					ctx.mu.Unlock()
+				}
 				req.Reply(true, nil)
 			default:
 				req.Reply(false, nil)
@@ -225,7 +334,7 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *s
 		// Check if this is a registration session
 		if sshConn.Permissions.Extensions["registration"] == "true" {
 			// Anonymous user - handle registration
-			handleRegistration(channel, sshConn.User())
+			handleRegistration(normalizedChan, sshConn.User(), ctx)
 			return
 		}
 
@@ -234,85 +343,91 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *s
 			var userID uint
 			n, err := fmt.Sscanf(sshConn.Permissions.Extensions["user_id"], "%d", &userID)
 			if err != nil || n != 1 || userID == 0 {
-				fmt.Fprintf(channel, "Invalid user ID in session. Please try again.\r\n")
+				fmt.Fprintf(normalizedChan, "Invalid user ID in session. Please try again.\n")
 				return
 			}
 			if err := database.DB.First(&user, userID).Error; err == nil {
 				// User is authenticated
-				handleAuthenticatedUser(channel, user)
+				handleAuthenticatedUser(normalizedChan, user, ctx)
 				return
 			}
 		}
 	}
 
 	// If we get here, something went wrong - close the connection
-	fmt.Fprintf(channel, "Authentication error. Please try again.\r\n")
+	fmt.Fprintf(normalizedChan, "Authentication error. Please try again.\n")
 }
 
-func handleRegistration(channel ssh.Channel, username string) {
-	fmt.Fprintf(channel, "Welcome to schat!\r\n\r\n")
+func handleRegistration(channel ssh.Channel, username string, ctx *sessionContext) {
+	// Channel is already wrapped in handleSession
+	fmt.Fprintf(channel, "Welcome to schat!\n\n")
 
 	terminal := term.NewTerminal(channel, "")
+	
+	// Set terminal size from PTY request
+	ctx.mu.Lock()
+	terminal.SetSize(ctx.width, ctx.height)
+	ctx.mu.Unlock()
 
 	// Get username if not provided
 	if username == "" {
 		terminal.SetPrompt("Please enter your desired username: ")
 		line, err := terminal.ReadLine()
 		if err != nil {
-			fmt.Fprintf(channel, "\r\nError reading input: %v\r\n", err)
+			fmt.Fprintf(channel, "\nError reading input: %v\n", err)
 			return
 		}
 		username = strings.TrimSpace(line)
 	}
 
 	if username == "" {
-		fmt.Fprintf(channel, "Username cannot be empty\r\n")
+		fmt.Fprintf(channel, "Username cannot be empty\n")
 		return
 	}
 
-	fmt.Fprintf(channel, "Username: %s\r\n", username)
-	fmt.Fprintf(channel, "\r\nChoose authentication method:\r\n")
-	fmt.Fprintf(channel, "1. Password\r\n")
-	fmt.Fprintf(channel, "2. SSH Key\r\n")
-	fmt.Fprintf(channel, "Press Enter to join as guest (guests room only)\r\n")
+	fmt.Fprintf(channel, "Username: %s\n", username)
+	fmt.Fprintf(channel, "\nChoose authentication method:\n")
+	fmt.Fprintf(channel, "1. Password\n")
+	fmt.Fprintf(channel, "2. SSH Key\n")
+	fmt.Fprintf(channel, "Press Enter to join as guest (guests room only)\n")
 	terminal.SetPrompt("Enter choice (1, 2, or Enter for guest): ")
 
 	choice, err := terminal.ReadLine()
 	if err != nil {
-		fmt.Fprintf(channel, "\r\nError reading input: %v\r\n", err)
+		fmt.Fprintf(channel, "\nError reading input: %v\n", err)
 		return
 	}
 	choice = strings.TrimSpace(choice)
 
 	// Guest access - empty choice
 	if choice == "" {
-		handleGuestUser(channel, username)
+		handleGuestUser(channel, username, ctx)
 		return
 	}
 
 	var password, sshKey string
 
 	if choice == "1" {
-		terminal.SetPrompt("\r\nEnter password (visible): ")
+		terminal.SetPrompt("\nEnter password (visible): ")
 		line, err := terminal.ReadLine()
 		if err != nil {
-			fmt.Fprintf(channel, "\r\nError reading input: %v\r\n", err)
+			fmt.Fprintf(channel, "\nError reading input: %v\n", err)
 			return
 		}
 		password = strings.TrimSpace(line)
 
 		if password == "" {
-			fmt.Fprintf(channel, "Password cannot be empty\r\n")
+			fmt.Fprintf(channel, "Password cannot be empty\n")
 			return
 		}
 	} else if choice == "2" {
-		fmt.Fprintf(channel, "\r\nPaste your SSH public key (end with a line containing only 'END'):\r\n")
+		fmt.Fprintf(channel, "\nPaste your SSH public key (end with a line containing only 'END'):\n")
 		terminal.SetPrompt("")
 		var keyLines []string
 		for {
 			line, err := terminal.ReadLine()
 			if err != nil {
-				fmt.Fprintf(channel, "\r\nError reading input: %v\r\n", err)
+				fmt.Fprintf(channel, "\nError reading input: %v\n", err)
 				return
 			}
 			line = strings.TrimSpace(line)
@@ -327,11 +442,11 @@ func handleRegistration(channel ssh.Channel, username string) {
 		sshKey = strings.Join(keyLines, " ")
 
 		if sshKey == "" {
-			fmt.Fprintf(channel, "SSH key cannot be empty\r\n")
+			fmt.Fprintf(channel, "SSH key cannot be empty\n")
 			return
 		}
 	} else {
-		fmt.Fprintf(channel, "Invalid choice. Please enter 1, 2, or press Enter for guest access.\r\n")
+		fmt.Fprintf(channel, "Invalid choice. Please enter 1, 2, or press Enter for guest access.\n")
 		return
 	}
 
@@ -343,14 +458,14 @@ func handleRegistration(channel ssh.Channel, username string) {
 	// Create user - first user is automatically admin
 	newUser, err := auth.CreateUser(username, password, sshKey, isFirstUser)
 	if err != nil {
-		fmt.Fprintf(channel, "\r\nRegistration failed: %v\r\n", err)
+		fmt.Fprintf(channel, "\nRegistration failed: %v\n", err)
 		return
 	}
 
 	if isFirstUser {
-		fmt.Fprintf(channel, "\r\nRegistration successful! You are the first user and have been granted admin privileges.\r\n")
+		fmt.Fprintf(channel, "\nRegistration successful! You are the first user and have been granted admin privileges.\n")
 	} else {
-		fmt.Fprintf(channel, "\r\nRegistration successful!\r\n")
+		fmt.Fprintf(channel, "\nRegistration successful!\n")
 		// Notify all admins about new user registration
 		sendNotificationToAdmins("user_registered", fmt.Sprintf("New user registered: %s", username), &newUser.ID, nil)
 	}
@@ -358,12 +473,14 @@ func handleRegistration(channel ssh.Channel, username string) {
 	logAction(newUser, "register", "User registered")
 
 	// Immediately authenticate and proceed to chat without reconnection
-	fmt.Fprintf(channel, "Connecting to chat...\r\n\r\n")
-	handleAuthenticatedUser(channel, newUser)
+	fmt.Fprintf(channel, "Connecting to chat...\n\n")
+	handleAuthenticatedUser(channel, newUser, ctx)
 }
 
 // handleGuestUser creates a temporary guest user and joins them to the guests room
-func handleGuestUser(channel ssh.Channel, username string) {
+func handleGuestUser(channel ssh.Channel, username string, ctx *sessionContext) {
+	// Channel is already wrapped in handleRegistration
+	
 	// Check if there's a banned guest with this nickname
 	var bannedGuest models.User
 	err := database.DB.Where("nickname = ? AND is_guest = ? AND is_banned = ? AND ban_expires_at > ?",
@@ -371,9 +488,9 @@ func handleGuestUser(channel ssh.Channel, username string) {
 	
 	if err == nil {
 		// Found a banned guest with this nickname
-		fmt.Fprintf(channel, "\r\nYou are banned from guest access.\r\n")
+		fmt.Fprintf(channel, "\nYou are banned from guest access.\n")
 		if bannedGuest.BanExpiresAt != nil {
-			fmt.Fprintf(channel, "Ban expires: %s\r\n", bannedGuest.BanExpiresAt.Format("2006-01-02 15:04:05"))
+			fmt.Fprintf(channel, "Ban expires: %s\n", bannedGuest.BanExpiresAt.Format("2006-01-02 15:04:05"))
 		}
 		return
 	}
@@ -381,7 +498,7 @@ func handleGuestUser(channel ssh.Channel, username string) {
 	// Get the guests room
 	var guestsRoom models.Room
 	if err := database.DB.Where("name = ?", "guests").First(&guestsRoom).Error; err != nil {
-		fmt.Fprintf(channel, "\r\nError: Guests room not found. Please contact an administrator.\r\n")
+		fmt.Fprintf(channel, "\nError: Guests room not found. Please contact an administrator.\n")
 		log.Printf("Guests room not found: %v", err)
 		return
 	}
@@ -402,25 +519,36 @@ func handleGuestUser(channel ssh.Channel, username string) {
 
 	// Save guest user to database (temporary)
 	if err := database.DB.Create(guestUser).Error; err != nil {
-		fmt.Fprintf(channel, "\r\nError creating guest user: %v\r\n", err)
+		fmt.Fprintf(channel, "\nError creating guest user: %v\n", err)
 		log.Printf("Error creating guest user: %v", err)
 		return
 	}
 
-	fmt.Fprintf(channel, "\r\nJoining as guest (guests room only)...\r\n\r\n")
+	fmt.Fprintf(channel, "\nJoining as guest (guests room only)...\n\n")
 	
 	// Start guest session
-	handleGuestSession(channel, guestUser)
+	handleGuestSession(channel, guestUser, ctx)
 }
 
 // handleGuestSession handles a guest user session (limited to guests room only)
-func handleGuestSession(channel ssh.Channel, user *models.User) {
+func handleGuestSession(channel ssh.Channel, user *models.User, ctx *sessionContext) {
+	// Channel is already wrapped in handleGuestUser or handleRegistration
+	
 	// Update last seen
 	user.LastSeenAt = time.Now()
 	database.DB.Save(user)
 
 	// Start reading input using term.Terminal for proper echo handling
 	terminal := term.NewTerminal(channel, "> ")
+	
+	// Set terminal size from PTY request
+	var width, height int
+	ctx.mu.Lock()
+	width = ctx.width
+	height = ctx.height
+	ctx.mu.Unlock()
+	
+	terminal.SetSize(width, height)
 
 	// Add client to server
 	client := &Client{
@@ -429,6 +557,14 @@ func handleGuestSession(channel ssh.Channel, user *models.User) {
 		Terminal: terminal,
 		LastMsg:  time.Now(),
 	}
+	
+	// Set terminal dimensions on client and update ctx
+	ctx.mu.Lock()
+	client.TermWidth = width
+	client.TermHeight = height
+	ctx.client = client
+	ctx.mu.Unlock()
+	
 	server.mutex.Lock()
 	server.clients[user.ID] = client
 	server.mutex.Unlock()
@@ -488,13 +624,24 @@ func handleGuestSession(channel ssh.Channel, user *models.User) {
 	}
 }
 
-func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
+func handleAuthenticatedUser(channel ssh.Channel, user *models.User, ctx *sessionContext) {
+	// Channel is already wrapped in handleSession or handleRegistration
+	
 	// Update last seen
 	user.LastSeenAt = time.Now()
 	database.DB.Save(user)
 
 	// Start reading input using term.Terminal for proper echo handling
 	terminal := term.NewTerminal(channel, "> ")
+	
+	// Set terminal size from PTY request
+	var width, height int
+	ctx.mu.Lock()
+	width = ctx.width
+	height = ctx.height
+	ctx.mu.Unlock()
+	
+	terminal.SetSize(width, height)
 
 	// Add client to server
 	client := &Client{
@@ -503,6 +650,14 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 		Terminal: terminal,
 		LastMsg:  time.Now(),
 	}
+	
+	// Set terminal dimensions on client and update ctx
+	ctx.mu.Lock()
+	client.TermWidth = width
+	client.TermHeight = height
+	ctx.client = client
+	ctx.mu.Unlock()
+	
 	server.mutex.Lock()
 	server.clients[user.ID] = client
 	server.mutex.Unlock()
@@ -738,7 +893,7 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User) {
 		// Check if user is muted
 		if user.IsMuted && user.MuteExpiresAt != nil && user.MuteExpiresAt.After(time.Now()) {
 			if !strings.HasPrefix(line, "/") {
-				fmt.Fprintf(channel, "You are muted until %s\n", user.MuteExpiresAt.Format("2006-01-02 15:04:05"))
+				fmt.Fprintf(client.Terminal, "You are muted until %s\n", user.MuteExpiresAt.Format("2006-01-02 15:04:05"))
 				continue
 			}
 		}
@@ -783,7 +938,7 @@ func handleCommand(client *Client, line string) {
 	// Special handling for /signup command which requires interactive input
 	if cmdName == "signup" || cmdName == "register" {
 		if !client.User.IsGuest {
-			fmt.Fprintf(client.Conn, "This command is only available for guest users\n")
+			fmt.Fprintf(client.Terminal, "This command is only available for guest users\n")
 			return
 		}
 		handleSignupInteractive(client)
@@ -793,7 +948,7 @@ func handleCommand(client *Client, line string) {
 	// Special handling for /broadcast command which requires interactive input
 	if cmdName == "broadcast" || cmdName == "schedulebroadcast" || cmdName == "announce" {
 		if !client.User.IsAdmin {
-			fmt.Fprintf(client.Conn, "This command requires admin privileges\n")
+			fmt.Fprintf(client.Terminal, "This command requires admin privileges\n")
 			return
 		}
 		handleBroadcastInteractive(client)
@@ -802,23 +957,23 @@ func handleCommand(client *Client, line string) {
 
 	cmd := commands.GetCommand(cmdName)
 	if cmd == nil {
-		fmt.Fprintf(client.Conn, "Unknown command: %s\n", cmdName)
+		fmt.Fprintf(client.Terminal, "Unknown command: %s\n", cmdName)
 		return
 	}
 
 	if cmd.AdminOnly && !client.User.IsAdmin {
-		fmt.Fprintf(client.Conn, "This command requires admin privileges\n")
+		fmt.Fprintf(client.Terminal, "This command requires admin privileges\n")
 		return
 	}
 
 	// Check if user is asking for help
 	if len(args) > 0 && (args[0] == "?" || args[0] == "help" || args[0] == "--help") {
-		fmt.Fprintf(client.Conn, "Command: %s\n", cmd.Name)
+		fmt.Fprintf(client.Terminal, "Command: %s\n", cmd.Name)
 		if len(cmd.Aliases) > 0 {
-			fmt.Fprintf(client.Conn, "Aliases: %s\n", strings.Join(cmd.Aliases, ", "))
+			fmt.Fprintf(client.Terminal, "Aliases: %s\n", strings.Join(cmd.Aliases, ", "))
 		}
-		fmt.Fprintf(client.Conn, "Description: %s\n", cmd.Description)
-		fmt.Fprintf(client.Conn, "Usage: %s\n", cmd.Usage)
+		fmt.Fprintf(client.Terminal, "Description: %s\n", cmd.Description)
+		fmt.Fprintf(client.Terminal, "Usage: %s\n", cmd.Usage)
 		return
 	}
 
@@ -834,7 +989,7 @@ func handleCommand(client *Client, line string) {
 
 	result, err := cmd.Handler(client.User, args)
 	if err != nil {
-		fmt.Fprintf(client.Conn, "Error: %v\n", err)
+		fmt.Fprintf(client.Terminal, "Error: %v\n", err)
 		return
 	}
 
@@ -907,7 +1062,7 @@ func handleCommand(client *Client, line string) {
 		if strings.HasPrefix(result, "@me ") {
 			handleMessage(client, result)
 		} else {
-			fmt.Fprintf(client.Conn, "%s\n", result)
+			fmt.Fprintf(client.Terminal, "%s\n", result)
 		}
 	}
 }
@@ -915,14 +1070,14 @@ func handleCommand(client *Client, line string) {
 func handleAddKey(client *Client, args []string) {
 	// Check if user already has an SSH key
 	if client.User.SSHKey != "" {
-		fmt.Fprintf(client.Conn, "You already have an SSH key configured. To replace it, contact an admin.\n")
+		fmt.Fprintf(client.Terminal, "You already have an SSH key configured. To replace it, contact an admin.\n")
 		return
 	}
 
 	// Check if user has a password - this ensures they have at least one auth method
 	// if SSH key validation fails, preventing lockout
 	if client.User.PasswordHash == "" {
-		fmt.Fprintf(client.Conn, "Error: Cannot add SSH key without a password set. Please contact an admin.\n")
+		fmt.Fprintf(client.Terminal, "Error: Cannot add SSH key without a password set. Please contact an admin.\n")
 		return
 	}
 
@@ -936,19 +1091,19 @@ func handleAddKey(client *Client, args []string) {
 		} else if argLower == "mr" || argLower == "machine-readable" {
 			machineReadable = true
 		} else {
-			fmt.Fprintf(client.Conn, "Unknown flag: %s\n", arg)
-			fmt.Fprintf(client.Conn, "Usage: /addkey [pp|preserve-password|keep-password] [mr|machine-readable]\n")
+			fmt.Fprintf(client.Terminal, "Unknown flag: %s\n", arg)
+			fmt.Fprintf(client.Terminal, "Usage: /addkey [pp|preserve-password|keep-password] [mr|machine-readable]\n")
 			return
 		}
 	}
 
-	fmt.Fprintf(client.Conn, "\nPaste your SSH public key below.\n")
-	fmt.Fprintf(client.Conn, "End with a line containing only 'END'\n")
+	fmt.Fprintf(client.Terminal, "\nPaste your SSH public key below.\n")
+	fmt.Fprintf(client.Terminal, "End with a line containing only 'END'\n")
 	if !preservePassword {
-		fmt.Fprintf(client.Conn, "\nNote: Your password will be removed after adding the SSH key.\n")
-		fmt.Fprintf(client.Conn, "Use '/addkey pp' to keep your password.\n")
+		fmt.Fprintf(client.Terminal, "\nNote: Your password will be removed after adding the SSH key.\n")
+		fmt.Fprintf(client.Terminal, "Use '/addkey pp' to keep your password.\n")
 	}
-	fmt.Fprintf(client.Conn, "\n")
+	fmt.Fprintf(client.Terminal, "\n")
 
 	// Store original prompt to restore later
 	originalPrompt := "> "
@@ -957,7 +1112,7 @@ func handleAddKey(client *Client, args []string) {
 	for {
 		line, err := client.Terminal.ReadLine()
 		if err != nil {
-			fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+			fmt.Fprintf(client.Terminal, "\nError reading input: %v\n", err)
 			client.Terminal.SetPrompt(originalPrompt)
 			return
 		}
@@ -965,9 +1120,9 @@ func handleAddKey(client *Client, args []string) {
 
 		// Check for private key markers - prevent users from pasting private keys
 		if isPrivateKeyMarker(line) {
-			fmt.Fprintf(client.Conn, "\n⚠️  WARNING: You appear to be pasting a PRIVATE key!\n")
-			fmt.Fprintf(client.Conn, "You should NEVER share your private key. Please paste your PUBLIC key instead.\n")
-			fmt.Fprintf(client.Conn, "Your public key file typically has a .pub extension (e.g., id_rsa.pub)\n\n")
+			fmt.Fprintf(client.Terminal, "\n⚠️  WARNING: You appear to be pasting a PRIVATE key!\n")
+			fmt.Fprintf(client.Terminal, "You should NEVER share your private key. Please paste your PUBLIC key instead.\n")
+			fmt.Fprintf(client.Terminal, "Your public key file typically has a .pub extension (e.g., id_rsa.pub)\n\n")
 			client.Terminal.SetPrompt(originalPrompt)
 			return
 		}
@@ -983,7 +1138,7 @@ func handleAddKey(client *Client, args []string) {
 	// SSH public keys should be on a single line (join wrapped lines with spaces)
 	sshKey := strings.Join(keyLines, " ")
 	if sshKey == "" {
-		fmt.Fprintf(client.Conn, "SSH key cannot be empty\n")
+		fmt.Fprintf(client.Terminal, "SSH key cannot be empty\n")
 		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
@@ -991,7 +1146,7 @@ func handleAddKey(client *Client, args []string) {
 	// Validate SSH key format
 	_, _, _, _, err := ssh.ParseAuthorizedKey([]byte(sshKey))
 	if err != nil {
-		fmt.Fprintf(client.Conn, "Invalid SSH key format: %v\n", err)
+		fmt.Fprintf(client.Terminal, "Invalid SSH key format: %v\n", err)
 		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
@@ -1005,7 +1160,7 @@ func handleAddKey(client *Client, args []string) {
 	}
 
 	if err := database.DB.Save(client.User).Error; err != nil {
-		fmt.Fprintf(client.Conn, "Failed to save SSH key: %v\n", err)
+		fmt.Fprintf(client.Terminal, "Failed to save SSH key: %v\n", err)
 		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
@@ -1014,13 +1169,13 @@ func handleAddKey(client *Client, args []string) {
 
 	// Output success message - machine-readable or human-readable
 	if machineReadable {
-		fmt.Fprintf(client.Conn, "\nSUCCESS: SSH_KEY_ADDED\n")
+		fmt.Fprintf(client.Terminal, "\nSUCCESS: SSH_KEY_ADDED\n")
 	} else {
-		fmt.Fprintf(client.Conn, "\nSSH key added successfully!\n")
+		fmt.Fprintf(client.Terminal, "\nSSH key added successfully!\n")
 		if preservePassword {
-			fmt.Fprintf(client.Conn, "You can now login using either your password or SSH key.\n")
+			fmt.Fprintf(client.Terminal, "You can now login using either your password or SSH key.\n")
 		} else {
-			fmt.Fprintf(client.Conn, "Your password has been removed. You can now only login using your SSH key.\n")
+			fmt.Fprintf(client.Terminal, "Your password has been removed. You can now only login using your SSH key.\n")
 		}
 	}
 
@@ -1049,7 +1204,7 @@ func isPrivateKeyMarker(line string) bool {
 // handleQRCode generates and sends a QR code to the chat
 func handleQRCode(client *Client, args []string) {
 	if len(args) == 0 {
-		fmt.Fprintf(client.Conn, "Usage: /qr <text or URL>\n")
+		fmt.Fprintf(client.Terminal, "Usage: /qr <text or URL>\n")
 		return
 	}
 
@@ -1058,20 +1213,20 @@ func handleQRCode(client *Client, args []string) {
 
 	// Check if user is in a room
 	if client.User.CurrentRoomID == nil {
-		fmt.Fprintf(client.Conn, "You are not in a room. Use /join <room> to join one.\n")
+		fmt.Fprintf(client.Terminal, "You are not in a room. Use /join <room> to join one.\n")
 		return
 	}
 
 	// Check if user is muted
 	if client.User.IsMuted && client.User.MuteExpiresAt != nil && client.User.MuteExpiresAt.After(time.Now()) {
-		fmt.Fprintf(client.Conn, "You are muted until %s\n", client.User.MuteExpiresAt.Format("2006-01-02 15:04:05"))
+		fmt.Fprintf(client.Terminal, "You are muted until %s\n", client.User.MuteExpiresAt.Format("2006-01-02 15:04:05"))
 		return
 	}
 
 	// Generate QR code
 	qr, err := qrcode.New(data, qrcode.Medium)
 	if err != nil {
-		fmt.Fprintf(client.Conn, "Error generating QR code: %v\n", err)
+		fmt.Fprintf(client.Terminal, "Error generating QR code: %v\n", err)
 		return
 	}
 
@@ -1102,7 +1257,7 @@ func handleQRCode(client *Client, args []string) {
 	broadcastToRoom(*client.User.CurrentRoomID, fullMessage, client.User.ID)
 
 	// Show to sender as well
-	fmt.Fprintf(client.Conn, "%s\n%s\n", announcement, qrString)
+	fmt.Fprintf(client.Terminal, "%s\n%s\n", announcement, qrString)
 
 	logAction(client.User, "qr", fmt.Sprintf("Sent QR code in room %d: %s", *client.User.CurrentRoomID, data))
 }
@@ -1144,7 +1299,7 @@ func qrCodeToUnicode(qr *qrcode.QRCode) string {
 
 // handleBroadcastInteractive handles the interactive broadcast scheduling
 func handleBroadcastInteractive(client *Client) {
-	fmt.Fprintf(client.Conn, "\n=== Schedule Broadcast Message ===\n\n")
+	fmt.Fprintf(client.Terminal, "\n=== Schedule Broadcast Message ===\n\n")
 	
 	originalPrompt := "> "
 	
@@ -1152,7 +1307,7 @@ func handleBroadcastInteractive(client *Client) {
 	client.Terminal.SetPrompt("Enter base time (YYYY-MM-DD HH:MM): ")
 	baseTimeStr, err := client.Terminal.ReadLine()
 	if err != nil {
-		fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+		fmt.Fprintf(client.Terminal, "\nError reading input: %v\n", err)
 		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
@@ -1161,14 +1316,14 @@ func handleBroadcastInteractive(client *Client) {
 	// Parse base time
 	baseTime, err := time.Parse("2006-01-02 15:04", baseTimeStr)
 	if err != nil {
-		fmt.Fprintf(client.Conn, "\nInvalid time format. Please use: YYYY-MM-DD HH:MM\n")
+		fmt.Fprintf(client.Terminal, "\nInvalid time format. Please use: YYYY-MM-DD HH:MM\n")
 		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
 	
 	// Ensure base time is in the future
 	if baseTime.Before(time.Now()) {
-		fmt.Fprintf(client.Conn, "\nBase time must be in the future.\n")
+		fmt.Fprintf(client.Terminal, "\nBase time must be in the future.\n")
 		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
@@ -1177,14 +1332,14 @@ func handleBroadcastInteractive(client *Client) {
 	client.Terminal.SetPrompt("Enter message for base time: ")
 	baseMessage, err := client.Terminal.ReadLine()
 	if err != nil {
-		fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+		fmt.Fprintf(client.Terminal, "\nError reading input: %v\n", err)
 		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
 	baseMessage = strings.TrimSpace(baseMessage)
 	
 	if baseMessage == "" {
-		fmt.Fprintf(client.Conn, "\nMessage cannot be empty.\n")
+		fmt.Fprintf(client.Terminal, "\nMessage cannot be empty.\n")
 		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
@@ -1204,12 +1359,12 @@ func handleBroadcastInteractive(client *Client) {
 	broadcasts = append(broadcasts, baseBroadcast)
 	
 	// Ask for reminders
-	fmt.Fprintf(client.Conn, "\n")
+	fmt.Fprintf(client.Terminal, "\n")
 	for {
 		client.Terminal.SetPrompt("Add a reminder? (y/n): ")
 		addReminder, err := client.Terminal.ReadLine()
 		if err != nil {
-			fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+			fmt.Fprintf(client.Terminal, "\nError reading input: %v\n", err)
 			client.Terminal.SetPrompt(originalPrompt)
 			return
 		}
@@ -1223,7 +1378,7 @@ func handleBroadcastInteractive(client *Client) {
 		client.Terminal.SetPrompt("Enter minutes offset (negative for before, positive for after): ")
 		offsetStr, err := client.Terminal.ReadLine()
 		if err != nil {
-			fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+			fmt.Fprintf(client.Terminal, "\nError reading input: %v\n", err)
 			client.Terminal.SetPrompt(originalPrompt)
 			return
 		}
@@ -1231,7 +1386,7 @@ func handleBroadcastInteractive(client *Client) {
 		
 		offset, err := strconv.Atoi(offsetStr)
 		if err != nil {
-			fmt.Fprintf(client.Conn, "\nInvalid offset. Please enter a number.\n")
+			fmt.Fprintf(client.Terminal, "\nInvalid offset. Please enter a number.\n")
 			continue
 		}
 		
@@ -1239,14 +1394,14 @@ func handleBroadcastInteractive(client *Client) {
 		client.Terminal.SetPrompt("Enter reminder message: ")
 		reminderMsg, err := client.Terminal.ReadLine()
 		if err != nil {
-			fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+			fmt.Fprintf(client.Terminal, "\nError reading input: %v\n", err)
 			client.Terminal.SetPrompt(originalPrompt)
 			return
 		}
 		reminderMsg = strings.TrimSpace(reminderMsg)
 		
 		if reminderMsg == "" {
-			fmt.Fprintf(client.Conn, "\nMessage cannot be empty.\n")
+			fmt.Fprintf(client.Terminal, "\nMessage cannot be empty.\n")
 			continue
 		}
 		
@@ -1255,7 +1410,7 @@ func handleBroadcastInteractive(client *Client) {
 		
 		// Ensure scheduled time is in the future
 		if scheduledAt.Before(time.Now()) {
-			fmt.Fprintf(client.Conn, "\nScheduled time would be in the past. Skipping.\n")
+			fmt.Fprintf(client.Terminal, "\nScheduled time would be in the past. Skipping.\n")
 			continue
 		}
 		
@@ -1270,21 +1425,21 @@ func handleBroadcastInteractive(client *Client) {
 		}
 		
 		broadcasts = append(broadcasts, reminder)
-		fmt.Fprintf(client.Conn, "Reminder added for %s\n", scheduledAt.Format("2006-01-02 15:04:05"))
+		fmt.Fprintf(client.Terminal, "Reminder added for %s\n", scheduledAt.Format("2006-01-02 15:04:05"))
 	}
 	
 	// Save all broadcasts
 	for _, broadcast := range broadcasts {
 		if err := database.DB.Create(&broadcast).Error; err != nil {
-			fmt.Fprintf(client.Conn, "\nError saving broadcast: %v\n", err)
+			fmt.Fprintf(client.Terminal, "\nError saving broadcast: %v\n", err)
 			client.Terminal.SetPrompt(originalPrompt)
 			return
 		}
 	}
 	
-	fmt.Fprintf(client.Conn, "\nBroadcast scheduled successfully!\n")
-	fmt.Fprintf(client.Conn, "Base time: %s\n", baseTime.Format("2006-01-02 15:04:05"))
-	fmt.Fprintf(client.Conn, "Total messages: %d\n\n", len(broadcasts))
+	fmt.Fprintf(client.Terminal, "\nBroadcast scheduled successfully!\n")
+	fmt.Fprintf(client.Terminal, "Base time: %s\n", baseTime.Format("2006-01-02 15:04:05"))
+	fmt.Fprintf(client.Terminal, "Total messages: %d\n\n", len(broadcasts))
 	
 	client.Terminal.SetPrompt(originalPrompt)
 	
@@ -1293,9 +1448,9 @@ func handleBroadcastInteractive(client *Client) {
 
 // handleSignupInteractive converts a guest user to a full user account
 func handleSignupInteractive(client *Client) {
-	fmt.Fprintf(client.Conn, "\n=== Convert Guest to Full Account ===\n\n")
-	fmt.Fprintf(client.Conn, "You are currently logged in as guest: %s\n", client.User.Nickname)
-	fmt.Fprintf(client.Conn, "Let's create a permanent account for you.\n\n")
+	fmt.Fprintf(client.Terminal, "\n=== Convert Guest to Full Account ===\n\n")
+	fmt.Fprintf(client.Terminal, "You are currently logged in as guest: %s\n", client.User.Nickname)
+	fmt.Fprintf(client.Terminal, "Let's create a permanent account for you.\n\n")
 	
 	originalPrompt := "> "
 	
@@ -1303,14 +1458,14 @@ func handleSignupInteractive(client *Client) {
 	client.Terminal.SetPrompt("Enter your desired username: ")
 	username, err := client.Terminal.ReadLine()
 	if err != nil {
-		fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+		fmt.Fprintf(client.Terminal, "\nError reading input: %v\n", err)
 		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
 	username = strings.TrimSpace(username)
 	
 	if username == "" {
-		fmt.Fprintf(client.Conn, "\nUsername cannot be empty.\n")
+		fmt.Fprintf(client.Terminal, "\nUsername cannot be empty.\n")
 		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
@@ -1318,20 +1473,20 @@ func handleSignupInteractive(client *Client) {
 	// Check if username already exists
 	var existingUser models.User
 	if err := database.DB.Where("username = ?", username).First(&existingUser).Error; err == nil {
-		fmt.Fprintf(client.Conn, "\nUsername '%s' is already taken. Please try another.\n", username)
+		fmt.Fprintf(client.Terminal, "\nUsername '%s' is already taken. Please try another.\n", username)
 		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
 	
 	// Choose authentication method
-	fmt.Fprintf(client.Conn, "\nChoose authentication method:\n")
-	fmt.Fprintf(client.Conn, "1. Password\n")
-	fmt.Fprintf(client.Conn, "2. SSH Key\n")
+	fmt.Fprintf(client.Terminal, "\nChoose authentication method:\n")
+	fmt.Fprintf(client.Terminal, "1. Password\n")
+	fmt.Fprintf(client.Terminal, "2. SSH Key\n")
 	client.Terminal.SetPrompt("Enter choice (1 or 2): ")
 	
 	choice, err := client.Terminal.ReadLine()
 	if err != nil {
-		fmt.Fprintf(client.Conn, "\nError reading input: %v\n", err)
+		fmt.Fprintf(client.Terminal, "\nError reading input: %v\n", err)
 		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
@@ -1340,28 +1495,28 @@ func handleSignupInteractive(client *Client) {
 	var password, sshKey string
 	
 	if choice == "1" {
-		client.Terminal.SetPrompt("\r\nEnter password (visible): ")
+		client.Terminal.SetPrompt("\nEnter password (visible): ")
 		line, err := client.Terminal.ReadLine()
 		if err != nil {
-			fmt.Fprintf(client.Conn, "\r\nError reading input: %v\r\n", err)
+			fmt.Fprintf(client.Terminal, "\nError reading input: %v\n", err)
 			client.Terminal.SetPrompt(originalPrompt)
 			return
 		}
 		password = strings.TrimSpace(line)
 		
 		if password == "" {
-			fmt.Fprintf(client.Conn, "Password cannot be empty\r\n")
+			fmt.Fprintf(client.Terminal, "Password cannot be empty\n")
 			client.Terminal.SetPrompt(originalPrompt)
 			return
 		}
 	} else if choice == "2" {
-		fmt.Fprintf(client.Conn, "\r\nPaste your SSH public key (end with a line containing only 'END'):\r\n")
+		fmt.Fprintf(client.Terminal, "\nPaste your SSH public key (end with a line containing only 'END'):\n")
 		client.Terminal.SetPrompt("")
 		var keyLines []string
 		for {
 			line, err := client.Terminal.ReadLine()
 			if err != nil {
-				fmt.Fprintf(client.Conn, "\r\nError reading input: %v\r\n", err)
+				fmt.Fprintf(client.Terminal, "\nError reading input: %v\n", err)
 				client.Terminal.SetPrompt(originalPrompt)
 				return
 			}
@@ -1376,12 +1531,12 @@ func handleSignupInteractive(client *Client) {
 		sshKey = strings.Join(keyLines, " ")
 		
 		if sshKey == "" {
-			fmt.Fprintf(client.Conn, "SSH key cannot be empty\r\n")
+			fmt.Fprintf(client.Terminal, "SSH key cannot be empty\n")
 			client.Terminal.SetPrompt(originalPrompt)
 			return
 		}
 	} else {
-		fmt.Fprintf(client.Conn, "Invalid choice. Please enter 1 or 2.\r\n")
+		fmt.Fprintf(client.Terminal, "Invalid choice. Please enter 1 or 2.\n")
 		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
@@ -1393,7 +1548,7 @@ func handleSignupInteractive(client *Client) {
 	if password != "" {
 		hashedPassword, err := auth.HashPassword(password)
 		if err != nil {
-			fmt.Fprintf(client.Conn, "\r\nFailed to hash password: %v\r\n", err)
+			fmt.Fprintf(client.Terminal, "\nFailed to hash password: %v\n", err)
 			client.Terminal.SetPrompt(originalPrompt)
 			return
 		}
@@ -1404,7 +1559,7 @@ func handleSignupInteractive(client *Client) {
 		// Validate SSH key format
 		_, _, _, _, err := ssh.ParseAuthorizedKey([]byte(sshKey))
 		if err != nil {
-			fmt.Fprintf(client.Conn, "\r\nInvalid SSH key format: %v\r\n", err)
+			fmt.Fprintf(client.Terminal, "\nInvalid SSH key format: %v\n", err)
 			client.Terminal.SetPrompt(originalPrompt)
 			return
 		}
@@ -1413,14 +1568,14 @@ func handleSignupInteractive(client *Client) {
 	
 	// Save the updated user
 	if err := database.DB.Save(client.User).Error; err != nil {
-		fmt.Fprintf(client.Conn, "\r\nFailed to create account: %v\r\n", err)
+		fmt.Fprintf(client.Terminal, "\nFailed to create account: %v\n", err)
 		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
 	
-	fmt.Fprintf(client.Conn, "\r\nAccount created successfully!\r\n")
-	fmt.Fprintf(client.Conn, "You are now a full user: %s\r\n", username)
-	fmt.Fprintf(client.Conn, "You can now access all rooms and features.\r\n\n")
+	fmt.Fprintf(client.Terminal, "\nAccount created successfully!\n")
+	fmt.Fprintf(client.Terminal, "You are now a full user: %s\n", username)
+	fmt.Fprintf(client.Terminal, "You can now access all rooms and features.\n\n")
 	
 	client.Terminal.SetPrompt(originalPrompt)
 	
@@ -1430,13 +1585,13 @@ func handleSignupInteractive(client *Client) {
 func handleMessage(client *Client, message string) {
 	// Check if user is in a room
 	if client.User.CurrentRoomID == nil {
-		fmt.Fprintf(client.Conn, "You are not in a room. Use /join <room> to join one.\n")
+		fmt.Fprintf(client.Terminal, "You are not in a room. Use /join <room> to join one.\n")
 		return
 	}
 
 	// Check if user is muted
 	if client.User.IsMuted && client.User.MuteExpiresAt != nil && client.User.MuteExpiresAt.After(time.Now()) {
-		fmt.Fprintf(client.Conn, "You are muted until %s\n", client.User.MuteExpiresAt.Format("2006-01-02 15:04:05"))
+		fmt.Fprintf(client.Terminal, "You are muted until %s\n", client.User.MuteExpiresAt.Format("2006-01-02 15:04:05"))
 		return
 	}
 
@@ -1534,19 +1689,19 @@ func handleMessage(client *Client, message string) {
 func handleGuestMessage(client *Client, message string) {
 	// Guest users can only send messages in the guests room
 	if client.User.CurrentRoomID == nil {
-		fmt.Fprintf(client.Conn, "Error: You are not in a room.\n")
+		fmt.Fprintf(client.Terminal, "Error: You are not in a room.\n")
 		return
 	}
 
 	// Verify they are in the guests room
 	var currentRoom models.Room
 	if err := database.DB.First(&currentRoom, *client.User.CurrentRoomID).Error; err != nil {
-		fmt.Fprintf(client.Conn, "Error: Could not verify current room.\n")
+		fmt.Fprintf(client.Terminal, "Error: Could not verify current room.\n")
 		return
 	}
 
 	if currentRoom.Name != "guests" {
-		fmt.Fprintf(client.Conn, "Error: Guests can only chat in the guests room.\n")
+		fmt.Fprintf(client.Terminal, "Error: Guests can only chat in the guests room.\n")
 		return
 	}
 
@@ -1596,24 +1751,24 @@ func handleGuestCommand(client *Client, line string) {
 	}
 
 	if !allowedCommands[cmdName] {
-		fmt.Fprintf(client.Conn, "Command not available for guests. Type /help for available commands.\n")
+		fmt.Fprintf(client.Terminal, "Command not available for guests. Type /help for available commands.\n")
 		return
 	}
 
 	// Handle help specially for guests
 	if cmdName == "help" || cmdName == "h" || cmdName == "?" {
-		fmt.Fprintf(client.Conn, "\nAvailable commands for guests:\n")
-		fmt.Fprintf(client.Conn, "  /help          - Show this help message\n")
-		fmt.Fprintf(client.Conn, "  /users         - List users in the guests room\n")
-		fmt.Fprintf(client.Conn, "  /me <action>   - Send an emote\n")
-		fmt.Fprintf(client.Conn, "\nTo get full access, please register an account.\n\n")
+		fmt.Fprintf(client.Terminal, "\nAvailable commands for guests:\n")
+		fmt.Fprintf(client.Terminal, "  /help          - Show this help message\n")
+		fmt.Fprintf(client.Terminal, "  /users         - List users in the guests room\n")
+		fmt.Fprintf(client.Terminal, "  /me <action>   - Send an emote\n")
+		fmt.Fprintf(client.Terminal, "\nTo get full access, please register an account.\n\n")
 		return
 	}
 
 	// Handle /me emote
 	if cmdName == "me" {
 		if len(args) == 0 {
-			fmt.Fprintf(client.Conn, "Usage: /me <action>\n")
+			fmt.Fprintf(client.Terminal, "Usage: /me <action>\n")
 			return
 		}
 		action := strings.Join(args, " ")
@@ -1647,7 +1802,7 @@ func handleGuestCommand(client *Client, line string) {
 	// Handle /users
 	if cmdName == "users" {
 		if client.User.CurrentRoomID == nil {
-			fmt.Fprintf(client.Conn, "You are not in a room.\n")
+			fmt.Fprintf(client.Terminal, "You are not in a room.\n")
 			return
 		}
 
@@ -1656,11 +1811,11 @@ func handleGuestCommand(client *Client, line string) {
 		database.DB.Where("current_room_id = ?", *client.User.CurrentRoomID).Find(&users)
 
 		if len(users) == 0 {
-			fmt.Fprintf(client.Conn, "No users in this room.\n")
+			fmt.Fprintf(client.Terminal, "No users in this room.\n")
 			return
 		}
 
-		fmt.Fprintf(client.Conn, "\nUsers in guests room:\n")
+		fmt.Fprintf(client.Terminal, "\nUsers in guests room:\n")
 		for _, u := range users {
 			displayName := u.Username
 			if u.Nickname != "" {
@@ -1670,9 +1825,9 @@ func handleGuestCommand(client *Client, line string) {
 			if u.IsGuest {
 				guestTag = " (guest)"
 			}
-			fmt.Fprintf(client.Conn, "  - %s%s\n", displayName, guestTag)
+			fmt.Fprintf(client.Terminal, "  - %s%s\n", displayName, guestTag)
 		}
-		fmt.Fprintf(client.Conn, "\n")
+		fmt.Fprintf(client.Terminal, "\n")
 		return
 	}
 }
@@ -1688,7 +1843,7 @@ func broadcastToRoom(roomID uint, message string, excludeUserID uint) {
 		if client.User.CurrentRoomID != nil && *client.User.CurrentRoomID == roomID {
 			client.Mutex.Lock()
 			// Use terminal.Write to properly display messages above the input line
-			client.Terminal.Write([]byte(message + "\r\n"))
+			client.Terminal.Write([]byte(message + "\n"))
 			// Send bell notification if enabled for all incoming messages
 			if client.User.BellEnabled {
 				client.Terminal.Write([]byte("\a"))
@@ -1729,7 +1884,7 @@ func sendNotificationToAdmins(notifType string, message string, relatedUser *uin
 		server.mutex.RLock()
 		if client, ok := server.clients[admin.ID]; ok {
 			client.Mutex.Lock()
-			client.Terminal.Write([]byte(fmt.Sprintf("\r\n[ADMIN] %s\r\n", message)))
+			client.Terminal.Write([]byte(fmt.Sprintf("\n[ADMIN] %s\n", message)))
 			if client.User.BellEnabled {
 				client.Terminal.Write([]byte("\a"))
 			}
@@ -1748,7 +1903,7 @@ func sendNotificationToUser(userID uint, notifType string, message string, relat
 	server.mutex.RLock()
 	if client, ok := server.clients[userID]; ok {
 		client.Mutex.Lock()
-		client.Terminal.Write([]byte(fmt.Sprintf("\r\n[Notification] %s\r\n", message)))
+		client.Terminal.Write([]byte(fmt.Sprintf("\n[Notification] %s\n", message)))
 		if client.User.BellEnabled {
 			client.Terminal.Write([]byte("\a"))
 		}
@@ -1775,13 +1930,13 @@ func deliverOfflineNotifications(client *Client) {
 	client.Mutex.Lock()
 	defer client.Mutex.Unlock()
 
-	client.Terminal.Write([]byte("\r\n=== Notifications ===\r\n"))
+	client.Terminal.Write([]byte("\n=== Notifications ===\n"))
 	// Reverse order to show oldest first
 	for i := len(notifications) - 1; i >= 0; i-- {
 		notif := notifications[i]
-		client.Terminal.Write([]byte(fmt.Sprintf("  %s\r\n", notif.Message)))
+		client.Terminal.Write([]byte(fmt.Sprintf("  %s\n", notif.Message)))
 	}
-	client.Terminal.Write([]byte(fmt.Sprintf("=== %d unread notification(s) ===\r\n\r\n", len(notifications))))
+	client.Terminal.Write([]byte(fmt.Sprintf("=== %d unread notification(s) ===\n\n", len(notifications))))
 
 	// Mark delivered notifications as read using their specific IDs
 	notificationIDs := make([]uint, len(notifications))
