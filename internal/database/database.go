@@ -144,13 +144,6 @@ func createDefaultRooms() error {
 			IsPermanent: true,
 		},
 		{
-			Name:        "guests",
-			Description: "Guest room - open to everyone without authentication",
-			IsPrivate:   false,
-			IsHidden:    false,
-			IsPermanent: true,
-		},
-		{
 			Name:        "dev",
 			Description: "Developer room (hidden)",
 			IsPrivate:   false,

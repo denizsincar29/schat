@@ -5,10 +5,10 @@ A feature-rich SSH-based chat application written in Go with support for user re
 ## Features
 
 - **Seamless SSH Connection Handling**: Connect via SSH with password or key-based authentication
-- **Guest Access**: Join the chat as a guest without registration (guests room only, with /mentions support)
+- **Guest Rooms**: Create temporary guest rooms that allow unauthenticated access with expiration times
 - **User Registration**: Easy registration process via SSH - no reconnection needed after registration
 - **Default Rooms**: Each user has a default room they join on login
-- **Preserved Rooms**: Special rooms (general, guests, dev) that are always available
+- **Preserved Rooms**: Special rooms (general, dev) that are always available
 - **Advanced Room Features**: Create rooms with max participants limit and expiration time
 - **Admin Roles**: Elevated privileges for administrators (first user is auto-admin)
 - **Admin Management**: Promote/demote users and manage the admin team
@@ -27,7 +27,7 @@ A feature-rich SSH-based chat application written in Go with support for user re
 - **Guest Moderation**: Ban guests by username or fingerprint
 - **User Management**: Admins can delete users
 - **User Reports**: Report users to admins with /report command
-- **Broadcast System**: Admins can schedule broadcast messages with reminders
+- **Broadcast System**: Admins can schedule broadcast messages with reminders (timezone-aware)
 - **Emotes**: Express yourself with /me commands
 - **Audit Logging**: Track all user actions and messages
 - **Bell Notifications**: Optional sound notifications for mentions
@@ -40,6 +40,7 @@ A feature-rich SSH-based chat application written in Go with support for user re
 - `/rooms` - List available rooms
 - `/join <room>` - Join a room
 - `/create <room> [--password <password>] [--max-participants <n>] [--expires-in <duration>] [description]` - Create a new room with optional settings
+- `/createguestroom <room> --expires-in <duration> [--max-participants <n>] [description]` - Create a guest room (allows unauthenticated access)
 - `/msg @username <message>` - Send a private message
 - `/nick <nickname>` - Set your nickname
 - `/status <message>` - Set your status message
@@ -68,7 +69,7 @@ A feature-rich SSH-based chat application written in Go with support for user re
 - `/admins` - List all admins (available to all users)
 - `/reports` - View user reports
 - `/markreports` - Mark all reports as read
-- `/broadcast` - Schedule a broadcast message with reminders (interactive)
+- `/broadcast` - Schedule a broadcast message with reminders (interactive, timezone-aware)
 - `/broadcasts` - List scheduled broadcast messages
 - `/cancelbroadcast <id>` - Cancel a scheduled broadcast
 
@@ -108,10 +109,34 @@ When a room expires:
 - Users receive a notification about the room expiration
 - The room is deleted from the system
 
+### Guest Rooms
+
+Guest rooms are temporary rooms that allow unauthenticated access:
+
+**Creating a Guest Room:**
+```bash
+/createguestroom #party --expires-in 2h Quick chat for the event
+```
+
+Requirements:
+- Must have an expiration time (at least 2 minutes)
+- Can optionally set max participants
+- Automatically marked as a guest room
+
+**Joining as a Guest:**
+1. Connect via SSH: `ssh -p 2222 username@hostname`
+2. When prompted for authentication, enter the guest room name instead of choosing 1 or 2
+3. You'll be connected to that guest room without authentication
+
+Guest room expiration:
+- Guests receive a warning 2 minutes before the room expires
+- When the room expires, all guests are automatically disconnected
+- Registered users in the room are moved to #general
+
 ### Guest Permissions
 
 Guests have limited but useful permissions:
-- Can send messages in the #guests room only
+- Can send messages in their guest room only
 - Can use `/help`, `/users`, `/me`, and `/mentions` commands
 - Cannot create rooms or send private messages
 - Can view and respond to @mentions
@@ -219,7 +244,7 @@ The automated key addition saves you from manually pasting the key!
 ssh -p 2222 -o PreferredAuthentications=keyboard-interactive newusername@localhost
 ```
 
-You'll be prompted to choose between password or SSH key authentication, or press Enter to join as a guest. After registration, you are automatically connected to the chat!
+You'll be prompted to choose between password or SSH key authentication, or enter a guest room name to join as a guest. After registration, you are automatically connected to the chat!
 
 **Guest Access:**
 ```bash
@@ -227,12 +252,16 @@ You'll be prompted to choose between password or SSH key authentication, or pres
 ssh -p 2222 -o PreferredAuthentications=keyboard-interactive guestname@localhost
 ```
 
-When prompted for authentication method, simply press Enter to join as a guest. Guest users:
-- Can only access the "guests" room
+When prompted for authentication method, enter the name of a guest room (instead of choosing 1 or 2). Guest users:
+- Can only access their assigned guest room
 - Cannot join other rooms or send private messages
 - Are automatically removed when they disconnect
+- Are automatically disconnected when the guest room expires
+- Receive a 2-minute warning before room expiration
 - Can be banned by admins using the `/ban` command (same as regular users)
 - Can convert to full user accounts using the `/signup` command
+
+**Note:** A registered user must create a guest room first using `/createguestroom` before guests can join.
 
 To convert a guest account to a full user account, use the `/signup` command while logged in as a guest. You'll be prompted to:
 1. Choose a permanent username
@@ -323,10 +352,11 @@ The application uses the following tables:
 
 ## Special Rooms
 
-The application creates three preserved rooms by default:
+The application creates two preserved rooms by default:
 - **general** - The default room for all users
-- **guests** - Public room accessible to guest users without registration
 - **dev** - Hidden room for development (only visible to admins)
+
+Registered users can create temporary **guest rooms** using the `/createguestroom` command, which allow unauthenticated access for a limited time.
 
 Users can set their preferred default room using the `/setdefault` command.
 
@@ -334,10 +364,12 @@ Users can set their preferred default room using the `/setdefault` command.
 
 Admins can schedule broadcast messages with multiple reminders using the `/broadcast` command:
 
-1. Enter the base time (event time) in format: YYYY-MM-DD HH:MM
+1. Enter the base time (event time) in format: YYYY-MM-DD HH:MM (in server's local timezone)
 2. Enter the message for the base time
 3. Add reminders with minute offsets (negative = before, positive = after)
 4. Each reminder gets its own custom message
+
+**Note:** The broadcast system is now timezone-aware and interprets entered times in the server's local timezone.
 
 Broadcasts are automatically sent when:
 - The scheduled time arrives
