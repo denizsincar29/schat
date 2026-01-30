@@ -34,6 +34,7 @@ type Room struct {
 	IsPrivate       bool `gorm:"default:false"`
 	IsHidden        bool `gorm:"default:false"`
 	IsPermanent     bool `gorm:"default:false"`
+	IsGuestRoom     bool `gorm:"default:false"` // Guest rooms allow unauthenticated access
 	CreatorID       *uint
 	Creator         *User  `gorm:"foreignKey:CreatorID;constraint:OnDelete:SET NULL;"`
 	Password        string // Password for passworded rooms (hashed)

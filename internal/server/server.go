@@ -413,8 +413,8 @@ func handleRegistration(channel ssh.Channel, username string, ctx *sessionContex
 	fmt.Fprintf(channel, "\nChoose authentication method:\n")
 	fmt.Fprintf(channel, "1. Password\n")
 	fmt.Fprintf(channel, "2. SSH Key\n")
-	fmt.Fprintf(channel, "Press Enter to join as guest (guests room only)\n")
-	terminal.SetPrompt("Enter choice (1, 2, or Enter for guest): ")
+	fmt.Fprintf(channel, "Or enter a guest room name to join as guest\n")
+	terminal.SetPrompt("Enter choice (1, 2, or guest room name): ")
 
 	choice, err := terminal.ReadLine()
 	if err != nil {
@@ -423,9 +423,9 @@ func handleRegistration(channel ssh.Channel, username string, ctx *sessionContex
 	}
 	choice = strings.TrimSpace(choice)
 
-	// Guest access - empty choice
-	if choice == "" {
-		handleGuestUser(channel, username, ctx)
+	// Guest access - if choice is not "1" or "2", treat as guest room name
+	if choice != "" && choice != "1" && choice != "2" {
+		handleGuestUser(channel, username, choice, ctx)
 		return
 	}
 
@@ -501,8 +501,8 @@ func handleRegistration(channel ssh.Channel, username string, ctx *sessionContex
 	handleAuthenticatedUser(channel, newUser, ctx)
 }
 
-// handleGuestUser creates a temporary guest user and joins them to the guests room
-func handleGuestUser(channel ssh.Channel, username string, ctx *sessionContext) {
+// handleGuestUser creates a temporary guest user and joins them to a guest room
+func handleGuestUser(channel ssh.Channel, username string, guestRoomName string, ctx *sessionContext) {
 	// Channel is already wrapped in handleRegistration
 	
 	// Check if there's a banned guest with this nickname
@@ -519,12 +519,31 @@ func handleGuestUser(channel ssh.Channel, username string, ctx *sessionContext) 
 		return
 	}
 
-	// Get the guests room
-	var guestsRoom models.Room
-	if err := database.DB.Where("name = ?", "guests").First(&guestsRoom).Error; err != nil {
-		fmt.Fprintf(channel, "\nError: Guests room not found. Please contact an administrator.\n")
-		log.Printf("Guests room not found: %v", err)
+	// Strip # prefix if present
+	guestRoomName = strings.TrimPrefix(guestRoomName, "#")
+	
+	// Get the guest room
+	var guestRoom models.Room
+	if err := database.DB.Where("name = ? AND is_guest_room = ?", guestRoomName, true).First(&guestRoom).Error; err != nil {
+		fmt.Fprintf(channel, "\nError: Guest room '%s' not found.\n", guestRoomName)
+		fmt.Fprintf(channel, "Please ask a registered user to create a guest room first.\n")
 		return
+	}
+
+	// Check if room has expired
+	if guestRoom.ExpiresAt != nil && guestRoom.ExpiresAt.Before(time.Now()) {
+		fmt.Fprintf(channel, "\nError: Guest room '%s' has expired.\n", guestRoomName)
+		return
+	}
+
+	// Check if room has max participants limit
+	if guestRoom.MaxParticipants != nil {
+		var currentCount int64
+		database.DB.Model(&models.User{}).Where("current_room_id = ?", guestRoom.ID).Count(&currentCount)
+		if int(currentCount) >= *guestRoom.MaxParticipants {
+			fmt.Fprintf(channel, "\nError: Guest room '%s' is full (max %d participants).\n", guestRoomName, *guestRoom.MaxParticipants)
+			return
+		}
 	}
 
 	// Create a unique guest username with timestamp to avoid collisions
@@ -535,8 +554,8 @@ func handleGuestUser(channel ssh.Channel, username string, ctx *sessionContext) 
 		Username:      guestUsername,
 		IsGuest:       true,
 		Nickname:      username,
-		CurrentRoomID: &guestsRoom.ID,
-		DefaultRoomID: &guestsRoom.ID,
+		CurrentRoomID: &guestRoom.ID,
+		DefaultRoomID: &guestRoom.ID,
 		LastSeenAt:    time.Now(),
 		BellEnabled:   false,
 	}
@@ -548,14 +567,14 @@ func handleGuestUser(channel ssh.Channel, username string, ctx *sessionContext) 
 		return
 	}
 
-	fmt.Fprintf(channel, "\nJoining as guest (guests room only)...\n\n")
+	fmt.Fprintf(channel, "\nJoining guest room '%s'...\n\n", guestRoomName)
 	
 	// Start guest session
-	handleGuestSession(channel, guestUser, ctx)
+	handleGuestSession(channel, guestUser, &guestRoom, ctx)
 }
 
-// handleGuestSession handles a guest user session (limited to guests room only)
-func handleGuestSession(channel ssh.Channel, user *models.User, ctx *sessionContext) {
+// handleGuestSession handles a guest user session (limited to their guest room only)
+func handleGuestSession(channel ssh.Channel, user *models.User, guestRoom *models.Room, ctx *sessionContext) {
 	// Channel is already wrapped in handleGuestUser or handleRegistration
 	
 	// Update last seen
@@ -630,8 +649,11 @@ func handleGuestSession(channel ssh.Channel, user *models.User, ctx *sessionCont
 	}
 
 	fmt.Fprintf(channel, "\n")
-	fmt.Fprintf(channel, "Welcome to the guests room, %s!\n", displayName)
-	fmt.Fprintf(channel, "You are logged in as a guest (limited to guests room only).\n")
+	fmt.Fprintf(channel, "Welcome to guest room #%s, %s!\n", guestRoom.Name, displayName)
+	fmt.Fprintf(channel, "You are logged in as a guest (limited to this room only).\n")
+	if guestRoom.ExpiresAt != nil {
+		fmt.Fprintf(channel, "This room expires at: %s\n", guestRoom.ExpiresAt.Format("2006-01-02 15:04:05"))
+	}
 	fmt.Fprintf(channel, "Type /help for available commands.\n")
 	fmt.Fprintf(channel, "\n")
 
@@ -1383,8 +1405,8 @@ func handleBroadcastInteractive(client *Client) {
 	}
 	baseTimeStr = strings.TrimSpace(baseTimeStr)
 	
-	// Parse base time
-	baseTime, err := time.Parse("2006-01-02 15:04", baseTimeStr)
+	// Parse base time in local timezone
+	baseTime, err := time.ParseInLocation("2006-01-02 15:04", baseTimeStr, time.Local)
 	if err != nil {
 		fmt.Fprintf(client.Terminal, "\nInvalid time format. Please use: YYYY-MM-DD HH:MM\n")
 		client.Terminal.SetPrompt(originalPrompt)
@@ -1789,28 +1811,28 @@ func handleMessage(client *Client, message string) {
 	logAction(client.User, "message", fmt.Sprintf("Sent message in room %d", *client.User.CurrentRoomID))
 }
 
-// handleGuestMessage handles messages from guest users (restricted to guests room)
+// handleGuestMessage handles messages from guest users (restricted to their guest room)
 func handleGuestMessage(client *Client, message string) {
 	// Restrict empty messages
 	if strings.TrimSpace(message) == "" {
 		return
 	}
 
-	// Guest users can only send messages in the guests room
+	// Guest users can only send messages in their current room
 	if client.User.CurrentRoomID == nil {
 		fmt.Fprintf(client.Terminal, "Error: You are not in a room.\n")
 		return
 	}
 
-	// Verify they are in the guests room
+	// Verify they are in a guest room
 	var currentRoom models.Room
 	if err := database.DB.First(&currentRoom, *client.User.CurrentRoomID).Error; err != nil {
 		fmt.Fprintf(client.Terminal, "Error: Could not verify current room.\n")
 		return
 	}
 
-	if currentRoom.Name != "guests" {
-		fmt.Fprintf(client.Terminal, "Error: Guests can only chat in the guests room.\n")
+	if !currentRoom.IsGuestRoom {
+		fmt.Fprintf(client.Terminal, "Error: Guests can only chat in guest rooms.\n")
 		return
 	}
 
@@ -2117,13 +2139,57 @@ func cleanupEmptyRooms() {
 	}
 }
 
-// cleanupExpiredRooms checks for rooms that have expired and disconnects all users
+// cleanupExpiredRooms checks for rooms that have expired and handles users accordingly
+// Also sends warnings 2 minutes before expiration for guest rooms
 func cleanupExpiredRooms() {
 	ticker := time.NewTicker(30 * time.Second) // Check every 30 seconds
 	defer ticker.Stop()
+	
+	// Track which rooms have already been warned
+	warnedRooms := make(map[uint]bool)
 
 	for range ticker.C {
 		now := time.Now()
+
+		// Find rooms expiring in 2 minutes (for warnings)
+		twoMinutesFromNow := now.Add(2 * time.Minute)
+		var soonExpiringRooms []models.Room
+		if err := database.DB.Where("expires_at IS NOT NULL AND expires_at > ? AND expires_at <= ? AND is_permanent = ? AND is_guest_room = ?", 
+			now, twoMinutesFromNow, false, true).
+			Find(&soonExpiringRooms).Error; err != nil {
+			log.Printf("Error fetching soon-expiring rooms: %v", err)
+		} else {
+			// Send warnings for guest rooms expiring soon
+			server.mutex.RLock()
+			for _, room := range soonExpiringRooms {
+				// Skip if already warned
+				if warnedRooms[room.ID] {
+					continue
+				}
+				
+				// Mark as warned
+				warnedRooms[room.ID] = true
+				
+				// Find all users in this room
+				var users []models.User
+				if err := database.DB.Where("current_room_id = ?", room.ID).Find(&users).Error; err != nil {
+					log.Printf("Error fetching users in soon-expiring room %s: %v", room.Name, err)
+					continue
+				}
+				
+				// Warn all online users
+				for _, user := range users {
+					if client, ok := server.clients[user.ID]; ok {
+						client.Mutex.Lock()
+						client.Terminal.Write([]byte(fmt.Sprintf("\n*** WARNING: Guest room #%s will expire in 2 minutes at %s ***\n", 
+							room.Name, room.ExpiresAt.Format("15:04:05"))))
+						client.Mutex.Unlock()
+					}
+				}
+				log.Printf("Sent expiration warning for guest room: %s", room.Name)
+			}
+			server.mutex.RUnlock()
+		}
 
 		// Find expired rooms (excluding permanent rooms)
 		var expiredRooms []models.Room
@@ -2134,6 +2200,9 @@ func cleanupExpiredRooms() {
 		}
 
 		for _, room := range expiredRooms {
+			// Remove from warned rooms if it was there
+			delete(warnedRooms, room.ID)
+			
 			// Find all users in this room
 			var users []models.User
 			if err := database.DB.Where("current_room_id = ?", room.ID).Find(&users).Error; err != nil {
@@ -2141,31 +2210,71 @@ func cleanupExpiredRooms() {
 				continue
 			}
 
-			// Move all users to the general room
-			var generalRoom models.Room
-			if err := database.DB.Where("name = ?", "general").First(&generalRoom).Error; err != nil {
-				log.Printf("Error finding general room: %v", err)
-				continue
-			}
-
-			// Batch notify online users - acquire lock once
-			server.mutex.RLock()
-			for _, user := range users {
-				// Update user's room
-				user.CurrentRoomID = &generalRoom.ID
-				if err := database.DB.Save(&user).Error; err != nil {
-					log.Printf("Error moving user %s from expired room: %v", user.Username, err)
+			// For guest rooms, disconnect all guests; for regular rooms, move users to general
+			if room.IsGuestRoom {
+				// Disconnect all guests in this room
+				server.mutex.RLock()
+				for _, user := range users {
+					if user.IsGuest {
+						// Notify and disconnect guest
+						if client, ok := server.clients[user.ID]; ok {
+							client.Mutex.Lock()
+							client.Terminal.Write([]byte(fmt.Sprintf("\n*** Guest room #%s has expired. You will be disconnected. ***\n", room.Name)))
+							client.Mutex.Unlock()
+							// Close the connection
+							client.Conn.Close()
+						}
+						// Guest users are cleaned up in their defer block
+					} else {
+						// Move registered users to general room
+						var generalRoom models.Room
+						if err := database.DB.Where("name = ?", "general").First(&generalRoom).Error; err != nil {
+							log.Printf("Error finding general room: %v", err)
+							continue
+						}
+						
+						user.CurrentRoomID = &generalRoom.ID
+						if err := database.DB.Save(&user).Error; err != nil {
+							log.Printf("Error moving user %s from expired room: %v", user.Username, err)
+							continue
+						}
+						
+						// Notify user if they are online
+						if client, ok := server.clients[user.ID]; ok {
+							client.Mutex.Lock()
+							client.Terminal.Write([]byte(fmt.Sprintf("\n*** Guest room #%s has expired. You have been moved to #general.\n", room.Name)))
+							client.Mutex.Unlock()
+						}
+					}
+				}
+				server.mutex.RUnlock()
+			} else {
+				// Regular expired room - move all users to general
+				var generalRoom models.Room
+				if err := database.DB.Where("name = ?", "general").First(&generalRoom).Error; err != nil {
+					log.Printf("Error finding general room: %v", err)
 					continue
 				}
 
-				// Notify user if they are online
-				if client, ok := server.clients[user.ID]; ok {
-					client.Mutex.Lock()
-					client.Terminal.Write([]byte(fmt.Sprintf("\n*** Room #%s has expired. You have been moved to #general.\n", room.Name)))
-					client.Mutex.Unlock()
+				// Batch notify online users - acquire lock once
+				server.mutex.RLock()
+				for _, user := range users {
+					// Update user's room
+					user.CurrentRoomID = &generalRoom.ID
+					if err := database.DB.Save(&user).Error; err != nil {
+						log.Printf("Error moving user %s from expired room: %v", user.Username, err)
+						continue
+					}
+
+					// Notify user if they are online
+					if client, ok := server.clients[user.ID]; ok {
+						client.Mutex.Lock()
+						client.Terminal.Write([]byte(fmt.Sprintf("\n*** Room #%s has expired. You have been moved to #general.\n", room.Name)))
+						client.Mutex.Unlock()
+					}
 				}
+				server.mutex.RUnlock()
 			}
-			server.mutex.RUnlock()
 
 			// Delete the expired room
 			if err := database.DB.Delete(&room).Error; err != nil {

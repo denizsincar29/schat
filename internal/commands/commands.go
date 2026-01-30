@@ -68,6 +68,14 @@ func init() {
 	})
 
 	registerCommand(&Command{
+		Name:        "createguestroom",
+		Aliases:     []string{"cgr", "guestroom"},
+		Description: "Create a guest room (allows unauthenticated access)",
+		Usage:       "/createguestroom #<room_name> --expires-in <duration> [--max-participants <n>] [description]",
+		Handler:     handleCreateGuestRoom,
+	})
+
+	registerCommand(&Command{
 		Name:        "leave",
 		Aliases:     []string{"l", "exit"},
 		Description: "Leave current room and join general",
@@ -735,6 +743,101 @@ func handleCreate(user *models.User, args []string) (string, error) {
 	if expiresAt != nil {
 		response += fmt.Sprintf(" (expires at %s)", expiresAt.Format("2006-01-02 15:04"))
 	}
+	return response, nil
+}
+
+func handleCreateGuestRoom(user *models.User, args []string) (string, error) {
+	if len(args) < 1 {
+		return "", fmt.Errorf("usage: /createguestroom #<room_name> --expires-in <duration> [--max-participants <n>] [description]")
+	}
+
+	roomName := stripPrefixes(args[0])
+	
+	// Validate room name - check for reserved names
+	roomNameLower := strings.ToLower(roomName)
+	for _, reserved := range reservedRoomNames {
+		if roomNameLower == reserved {
+			return "", fmt.Errorf("room name '%s' is reserved and cannot be used", roomName)
+		}
+	}
+
+	// Check for minimum length
+	if len(roomName) < 2 {
+		return "", fmt.Errorf("room name must be at least 2 characters long")
+	}
+
+	// Check for maximum length
+	if len(roomName) > 32 {
+		return "", fmt.Errorf("room name must be at most 32 characters long")
+	}
+
+	// Parse arguments for max participants, expiration, and description
+	var maxParticipants *int
+	var expiresAt *time.Time
+	var descriptionParts []string
+	i := 1
+	for i < len(args) {
+		if args[i] == "--max-participants" || args[i] == "--max" {
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("--max-participants flag requires a number argument")
+			}
+			maxPart, err := strconv.Atoi(args[i+1])
+			if err != nil || maxPart < 1 {
+				return "", fmt.Errorf("--max-participants must be a positive number")
+			}
+			if maxPart > 1000 {
+				return "", fmt.Errorf("--max-participants cannot exceed 1000")
+			}
+			maxParticipants = &maxPart
+			i += 2
+		} else if args[i] == "--expires-in" || args[i] == "--expires" {
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("--expires-in flag is required for guest rooms (e.g., 30m, 2h, 1h30m)")
+			}
+			duration, err := time.ParseDuration(args[i+1])
+			if err != nil {
+				return "", fmt.Errorf("invalid duration format: %s (use format like 30m, 2h, 1h30m)", args[i+1])
+			}
+			if duration < 2*time.Minute {
+				return "", fmt.Errorf("expiration time must be at least 2 minutes")
+			}
+			expireTime := time.Now().Add(duration)
+			expiresAt = &expireTime
+			i += 2
+		} else {
+			descriptionParts = append(descriptionParts, args[i])
+			i++
+		}
+	}
+	
+	// Guest rooms must have an expiration time
+	if expiresAt == nil {
+		return "", fmt.Errorf("guest rooms must have an expiration time. Use --expires-in flag (e.g., --expires-in 2h)")
+	}
+	
+	description := strings.Join(descriptionParts, " ")
+
+	creatorID := user.ID
+	room := models.Room{
+		Name:            roomName,
+		Description:     description,
+		CreatorID:       &creatorID,
+		MaxParticipants: maxParticipants,
+		ExpiresAt:       expiresAt,
+		IsGuestRoom:     true,
+	}
+
+	if err := database.DB.Create(&room).Error; err != nil {
+		return "", fmt.Errorf("failed to create guest room: %w", err)
+	}
+
+	// Build response message with room features
+	response := fmt.Sprintf("Created guest room: #%s", roomName)
+	if maxParticipants != nil {
+		response += fmt.Sprintf(" (max %d participants)", *maxParticipants)
+	}
+	response += fmt.Sprintf(" (expires at %s)", expiresAt.Format("2006-01-02 15:04"))
+	response += fmt.Sprintf("\nGuests can join by typing the room name: %s", roomName)
 	return response, nil
 }
 
