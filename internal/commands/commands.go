@@ -365,6 +365,24 @@ func init() {
 		Handler:     handleCancelBroadcast,
 		AdminOnly:   true,
 	})
+
+	registerCommand(&Command{
+		Name:        "gc",
+		Aliases:     []string{"garbagecollect", "cleanup"},
+		Description: "Garbage collect and fix incorrect database items (admin only)",
+		Usage:       "/gc",
+		Handler:     handleGarbageCollect,
+		AdminOnly:   true,
+	})
+
+	registerCommand(&Command{
+		Name:        "deleteroom",
+		Aliases:     []string{"delroom", "removeroom"},
+		Description: "Delete a room and move users appropriately (admin only)",
+		Usage:       "/deleteroom #<room_name>",
+		Handler:     handleDeleteRoom,
+		AdminOnly:   true,
+	})
 }
 
 func registerCommand(cmd *Command) {
@@ -2004,5 +2022,210 @@ func handleCancelBroadcast(user *models.User, args []string) (string, error) {
 	}
 
 	return fmt.Sprintf("Cancelled broadcast ID: %d", broadcastID), nil
+}
+
+func handleGarbageCollect(user *models.User, args []string) (string, error) {
+	var result strings.Builder
+	result.WriteString("Running garbage collection...\n\n")
+
+	// 1. Find and clean up expired rooms
+	var expiredRooms []models.Room
+	if err := database.DB.Where("expires_at IS NOT NULL AND expires_at < ? AND is_permanent = ?", time.Now(), false).Find(&expiredRooms).Error; err != nil {
+		log.Printf("Error finding expired rooms: %v", err)
+	} else if len(expiredRooms) > 0 {
+		for _, room := range expiredRooms {
+			// Move all users in this room to general
+			var generalRoom models.Room
+			if err := database.DB.Where("name = ?", "general").First(&generalRoom).Error; err == nil {
+				database.DB.Model(&models.User{}).Where("current_room_id = ?", room.ID).Update("current_room_id", generalRoom.ID)
+				database.DB.Model(&models.User{}).Where("default_room_id = ?", room.ID).Update("default_room_id", nil)
+			}
+			
+			// Delete the room and its messages
+			database.DB.Unscoped().Where("room_id = ?", room.ID).Delete(&models.ChatMessage{})
+			database.DB.Unscoped().Delete(&room)
+			result.WriteString(fmt.Sprintf("✓ Deleted expired room: #%s\n", room.Name))
+		}
+	}
+
+	// 2. Find orphaned rooms (no creator, not permanent, not a guest room with users)
+	var orphanedRooms []models.Room
+	if err := database.DB.Where("creator_id IS NULL AND is_permanent = ? AND is_guest_room = ?", false, false).Find(&orphanedRooms).Error; err != nil {
+		log.Printf("Error finding orphaned rooms: %v", err)
+	} else if len(orphanedRooms) > 0 {
+		for _, room := range orphanedRooms {
+			// Check if room has any users
+			var userCount int64
+			database.DB.Model(&models.User{}).Where("current_room_id = ?", room.ID).Count(&userCount)
+			
+			if userCount == 0 {
+				// Move users who have this as default room to nil
+				database.DB.Model(&models.User{}).Where("default_room_id = ?", room.ID).Update("default_room_id", nil)
+				
+				// Delete the room and its messages
+				database.DB.Unscoped().Where("room_id = ?", room.ID).Delete(&models.ChatMessage{})
+				database.DB.Unscoped().Delete(&room)
+				result.WriteString(fmt.Sprintf("✓ Deleted orphaned room: #%s\n", room.Name))
+			}
+		}
+	}
+
+	// 3. Clean up users pointing to non-existent rooms
+	var usersWithInvalidRooms []models.User
+	if err := database.DB.Where("current_room_id IS NOT NULL").Find(&usersWithInvalidRooms).Error; err != nil {
+		log.Printf("Error finding users with rooms: %v", err)
+	} else {
+		var generalRoom models.Room
+		database.DB.Where("name = ?", "general").First(&generalRoom)
+		
+		for _, u := range usersWithInvalidRooms {
+			var room models.Room
+			if err := database.DB.First(&room, *u.CurrentRoomID).Error; err != nil {
+				// Room doesn't exist, move user to general
+				u.CurrentRoomID = &generalRoom.ID
+				database.DB.Save(&u)
+				result.WriteString(fmt.Sprintf("✓ Fixed user @%s with invalid room reference\n", u.Username))
+			}
+		}
+	}
+
+	// 4. Clean up soft-deleted users
+	var softDeletedUsers []models.User
+	if err := database.DB.Unscoped().Where("deleted_at IS NOT NULL").Find(&softDeletedUsers).Error; err != nil {
+		log.Printf("Error finding soft-deleted users: %v", err)
+	} else if len(softDeletedUsers) > 0 {
+		for _, u := range softDeletedUsers {
+			// Delete user's related data
+			database.DB.Unscoped().Where("user_id = ?", u.ID).Delete(&models.Ban{})
+			database.DB.Unscoped().Where("banned_by_id = ?", u.ID).Delete(&models.Ban{})
+			database.DB.Unscoped().Where("user_id = ?", u.ID).Delete(&models.Mute{})
+			database.DB.Unscoped().Where("muted_by_id = ?", u.ID).Delete(&models.Mute{})
+			database.DB.Unscoped().Where("user_id = ?", u.ID).Delete(&models.Mention{})
+			database.DB.Unscoped().Where("user_id = ?", u.ID).Delete(&models.AuditLog{})
+			database.DB.Unscoped().Where("user_id = ?", u.ID).Delete(&models.ChatMessage{})
+			database.DB.Unscoped().Where("recipient_id = ?", u.ID).Delete(&models.ChatMessage{})
+			database.DB.Unscoped().Delete(&u)
+			result.WriteString(fmt.Sprintf("✓ Cleaned up soft-deleted user: @%s\n", u.Username))
+		}
+	}
+
+	// 5. Check for rooms with unique key constraint issues (soft-deleted but still blocking)
+	var softDeletedRooms []models.Room
+	if err := database.DB.Unscoped().Where("deleted_at IS NOT NULL").Find(&softDeletedRooms).Error; err != nil {
+		log.Printf("Error finding soft-deleted rooms: %v", err)
+	} else if len(softDeletedRooms) > 0 {
+		for _, room := range softDeletedRooms {
+			// Hard delete the room and its messages
+			database.DB.Unscoped().Where("room_id = ?", room.ID).Delete(&models.ChatMessage{})
+			database.DB.Unscoped().Delete(&room)
+			result.WriteString(fmt.Sprintf("✓ Cleaned up soft-deleted room: #%s\n", room.Name))
+		}
+	}
+
+	// 6. Clean up inactive notifications
+	thirtyDaysAgo := time.Now().AddDate(0, 0, -30)
+	var oldNotifications int64
+	database.DB.Unscoped().Where("created_at < ? AND is_read = ?", thirtyDaysAgo, true).Delete(&models.Notification{}).Count(&oldNotifications)
+	if oldNotifications > 0 {
+		result.WriteString(fmt.Sprintf("✓ Deleted %d old notifications\n", oldNotifications))
+	}
+
+	// 7. Clean up old audit logs (older than 90 days)
+	ninetyDaysAgo := time.Now().AddDate(0, 0, -90)
+	var oldAuditLogs int64
+	database.DB.Unscoped().Where("created_at < ?", ninetyDaysAgo).Delete(&models.AuditLog{}).Count(&oldAuditLogs)
+	if oldAuditLogs > 0 {
+		result.WriteString(fmt.Sprintf("✓ Deleted %d old audit logs\n", oldAuditLogs))
+	}
+
+	logAction(user, "gc", "Ran garbage collection")
+	
+	if result.Len() == len("Running garbage collection...\n\n") {
+		return "Garbage collection complete. No issues found.", nil
+	}
+	
+	result.WriteString("\nGarbage collection complete.")
+	return result.String(), nil
+}
+
+func handleDeleteRoom(user *models.User, args []string) (string, error) {
+	if len(args) < 1 {
+		return "", fmt.Errorf("usage: /deleteroom #<room_name>")
+	}
+
+	roomName := stripPrefixes(args[0])
+
+	// Find the room
+	var room models.Room
+	if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
+		return "", fmt.Errorf("room not found: %s", roomName)
+	}
+
+	// Prevent deletion of permanent rooms
+	if room.IsPermanent {
+		return "", fmt.Errorf("cannot delete permanent room: #%s", roomName)
+	}
+
+	// Get general room for moving users
+	var generalRoom models.Room
+	if err := database.DB.Where("name = ?", "general").First(&generalRoom).Error; err != nil {
+		return "", fmt.Errorf("general room not found - cannot proceed")
+	}
+
+	// Find all users currently in this room
+	var usersInRoom []models.User
+	if err := database.DB.Where("current_room_id = ?", room.ID).Find(&usersInRoom).Error; err != nil {
+		log.Printf("Error finding users in room: %v", err)
+	}
+
+	// Handle users in the room
+	for _, u := range usersInRoom {
+		if u.IsGuest {
+			// For guests, they will be disconnected by the system
+			// Just set their room to nil for now
+			u.CurrentRoomID = nil
+			database.DB.Save(&u)
+		} else {
+			// For normal users, move them to general
+			u.CurrentRoomID = &generalRoom.ID
+			database.DB.Save(&u)
+		}
+	}
+
+	// Update any users who have this as their default room
+	database.DB.Model(&models.User{}).Where("default_room_id = ?", room.ID).Update("default_room_id", nil)
+
+	// Delete all messages in this room
+	database.DB.Unscoped().Where("room_id = ?", room.ID).Delete(&models.ChatMessage{})
+
+	// Delete the room
+	if err := database.DB.Unscoped().Delete(&room).Error; err != nil {
+		return "", fmt.Errorf("failed to delete room: %w", err)
+	}
+
+	logAction(user, "deleteroom", fmt.Sprintf("Deleted room %s", roomName))
+
+	// Build result message
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("Room #%s has been deleted.\n", roomName))
+	if len(usersInRoom) > 0 {
+		guestCount := 0
+		normalCount := 0
+		for _, u := range usersInRoom {
+			if u.IsGuest {
+				guestCount++
+			} else {
+				normalCount++
+			}
+		}
+		if normalCount > 0 {
+			result.WriteString(fmt.Sprintf("%d user(s) moved to #general.\n", normalCount))
+		}
+		if guestCount > 0 {
+			result.WriteString(fmt.Sprintf("%d guest(s) marked for disconnect.\n", guestCount))
+		}
+	}
+
+	return result.String(), nil
 }
 
