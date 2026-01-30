@@ -663,7 +663,7 @@ func handleGuestSession(channel ssh.Channel, user *models.User, guestRoom *model
 	fmt.Fprintf(channel, "Type /help for available commands.\n")
 	fmt.Fprintf(channel, "\n")
 
-	// Show chat history for guests room
+	// Show chat history for current room
 	showChatHistory(channel, user)
 
 	// Broadcast join message
@@ -697,7 +697,7 @@ func handleGuestSession(channel ssh.Channel, user *models.User, guestRoom *model
 		if strings.HasPrefix(line, "/") {
 			handleGuestCommand(client, line)
 		} else {
-			// Regular message - only in guests room
+			// Regular message
 			handleGuestMessage(client, line)
 		}
 	}
@@ -1097,7 +1097,7 @@ func handleCommand(client *Client, line string) {
 		database.DB.First(client.User, client.User.ID)
 
 		switch cmdName {
-		case "create":
+		case "create", "createguestroom", "cgr", "guestroom":
 			// Room was created, notify admins
 			if len(args) > 0 {
 				roomName := args[0]
@@ -1897,7 +1897,7 @@ func handleGuestCommand(client *Client, line string) {
 	if cmdName == "help" || cmdName == "h" || cmdName == "?" {
 		fmt.Fprintf(client.Terminal, "\nAvailable commands for guests:\n")
 		fmt.Fprintf(client.Terminal, "  /help          - Show this help message\n")
-		fmt.Fprintf(client.Terminal, "  /users         - List users in the guests room\n")
+		fmt.Fprintf(client.Terminal, "  /users         - List users in the current room\n")
 		fmt.Fprintf(client.Terminal, "  /me <action>   - Send an emote\n")
 		fmt.Fprintf(client.Terminal, "  /mentions      - View your unread mentions\n")
 		fmt.Fprintf(client.Terminal, "\nTo get full access, please register an account.\n\n")
@@ -1982,7 +1982,7 @@ func handleGuestCommand(client *Client, line string) {
 			return
 		}
 
-		fmt.Fprintf(client.Terminal, "\nUsers in guests room:\n")
+		fmt.Fprintf(client.Terminal, "\nUsers in current room:\n")
 		for _, u := range users {
 			displayName := u.Username
 			if u.Nickname != "" {

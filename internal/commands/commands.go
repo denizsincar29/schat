@@ -741,7 +741,7 @@ func handleCreate(user *models.User, args []string) (string, error) {
 		response += fmt.Sprintf(" (max %d participants)", *maxParticipants)
 	}
 	if expiresAt != nil {
-		response += fmt.Sprintf(" (expires at %s)", expiresAt.Format("2006-01-02 15:04"))
+		response += fmt.Sprintf(" (expires at %s)", expiresAt.Format("2006-01-02 15:04 MST"))
 	}
 	return response, nil
 }
@@ -836,7 +836,7 @@ func handleCreateGuestRoom(user *models.User, args []string) (string, error) {
 	if maxParticipants != nil {
 		response += fmt.Sprintf(" (max %d participants)", *maxParticipants)
 	}
-	response += fmt.Sprintf(" (expires at %s)", expiresAt.Format("2006-01-02 15:04"))
+	response += fmt.Sprintf(" (expires at %s)", expiresAt.Format("2006-01-02 15:04 MST"))
 	response += fmt.Sprintf("\nGuests can join by typing the room name: %s", roomName)
 	return response, nil
 }
@@ -1177,7 +1177,7 @@ func handleBan(user *models.User, args []string) (string, error) {
 	}
 	logAction(user, "ban", fmt.Sprintf("Banned %s %s for %s: %s", userType, username, durationStr, reason))
 
-	return fmt.Sprintf("Banned @%s until %s", username, expiresAt.Format("2006-01-02 15:04:05")), nil
+	return fmt.Sprintf("Banned @%s until %s", username, expiresAt.Format("2006-01-02 15:04:05 MST")), nil
 }
 
 func handleKick(user *models.User, args []string) (string, error) {
@@ -1229,7 +1229,7 @@ func handleMute(user *models.User, args []string) (string, error) {
 
 	logAction(user, "mute", fmt.Sprintf("Muted %s for %s: %s", username, durationStr, reason))
 
-	return fmt.Sprintf("Muted @%s until %s", username, expiresAt.Format("2006-01-02 15:04:05")), nil
+	return fmt.Sprintf("Muted @%s until %s", username, expiresAt.Format("2006-01-02 15:04:05 MST")), nil
 }
 
 func handleUnban(user *models.User, args []string) (string, error) {
@@ -1780,12 +1780,12 @@ func handleViewUser(user *models.User, args []string) (string, error) {
 	result.WriteString(fmt.Sprintf("Is Admin: %v\n", targetUser.IsAdmin))
 	result.WriteString(fmt.Sprintf("Is Banned: %v\n", targetUser.IsBanned))
 	if targetUser.IsBanned && targetUser.BanExpiresAt != nil {
-		result.WriteString(fmt.Sprintf("Ban Expires: %s\n", targetUser.BanExpiresAt.Format("2006-01-02 15:04:05")))
+		result.WriteString(fmt.Sprintf("Ban Expires: %s\n", targetUser.BanExpiresAt.Format("2006-01-02 15:04:05 MST")))
 	}
 	
 	result.WriteString(fmt.Sprintf("Is Muted: %v\n", targetUser.IsMuted))
 	if targetUser.IsMuted && targetUser.MuteExpiresAt != nil {
-		result.WriteString(fmt.Sprintf("Mute Expires: %s\n", targetUser.MuteExpiresAt.Format("2006-01-02 15:04:05")))
+		result.WriteString(fmt.Sprintf("Mute Expires: %s\n", targetUser.MuteExpiresAt.Format("2006-01-02 15:04:05 MST")))
 	}
 
 	result.WriteString(fmt.Sprintf("Bell Enabled: %v\n", targetUser.BellEnabled))
