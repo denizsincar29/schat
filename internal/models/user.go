@@ -8,23 +8,23 @@ import (
 
 type User struct {
 	gorm.Model
-	Username       string `gorm:"unique;not null"`
-	PasswordHash   string
-	SSHKey         string `gorm:"type:text"`
-	IsAdmin        bool   `gorm:"default:false"`
-	IsGuest        bool   `gorm:"default:false"`
-	Nickname       string
-	Status         string
-	BellEnabled    bool  `gorm:"default:true"`
-	CurrentRoomID  *uint `gorm:"constraint:OnDelete:SET NULL;"`
-	CurrentRoom    *Room `gorm:"foreignKey:CurrentRoomID"`
-	DefaultRoomID  *uint `gorm:"constraint:OnDelete:SET NULL;"`
-	DefaultRoom    *Room `gorm:"foreignKey:DefaultRoomID"`
-	IsBanned       bool  `gorm:"default:false"`
-	BanExpiresAt   *time.Time
-	IsMuted        bool `gorm:"default:false"`
-	MuteExpiresAt  *time.Time
-	LastSeenAt     time.Time
+	Username      string `gorm:"unique;not null"`
+	PasswordHash  string
+	SSHKey        string `gorm:"type:text"`
+	IsAdmin       bool   `gorm:"default:false"`
+	IsGuest       bool   `gorm:"default:false"`
+	Nickname      string
+	Status        string
+	BellEnabled   bool  `gorm:"default:true"`
+	CurrentRoomID *uint `gorm:"constraint:OnDelete:SET NULL;"`
+	CurrentRoom   *Room `gorm:"foreignKey:CurrentRoomID"`
+	DefaultRoomID *uint `gorm:"constraint:OnDelete:SET NULL;"`
+	DefaultRoom   *Room `gorm:"foreignKey:DefaultRoomID"`
+	IsBanned      bool  `gorm:"default:false"`
+	BanExpiresAt  *time.Time
+	IsMuted       bool `gorm:"default:false"`
+	MuteExpiresAt *time.Time
+	LastSeenAt    time.Time
 }
 
 type Room struct {
@@ -133,4 +133,3 @@ type BroadcastMessage struct {
 	IsSent       bool      `gorm:"default:false"`
 	MinuteOffset int       // Minutes relative to BaseTime (negative = before, positive = after)
 }
-

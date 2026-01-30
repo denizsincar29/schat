@@ -156,13 +156,13 @@ func createDefaultRooms() error {
 	for _, room := range defaultRooms {
 		var existingRoom models.Room
 		result := DB.Where("name = ?", room.Name).First(&existingRoom)
-		
+
 		if result.Error == nil {
 			// Room exists, update its properties
 			DB.Model(&existingRoom).Updates(map[string]interface{}{
-				"description": room.Description,
-				"is_private":  room.IsPrivate,
-				"is_hidden":   room.IsHidden,
+				"description":  room.Description,
+				"is_private":   room.IsPrivate,
+				"is_hidden":    room.IsHidden,
 				"is_permanent": room.IsPermanent,
 			})
 			log.Printf("Updated room: %s", room.Name)

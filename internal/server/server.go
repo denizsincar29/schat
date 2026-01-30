@@ -183,10 +183,10 @@ func Run() error {
 
 	// Start background cleanup routine
 	go cleanupExpiredBansAndMutes()
-	
+
 	// Start room expiration cleanup
 	go cleanupExpiredRooms()
-	
+
 	// Start broadcast scheduler
 	go broadcastScheduler()
 
@@ -241,7 +241,7 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *s
 	// Channel to signal when PTY/shell setup is complete
 	setupDone := make(chan bool, 1)
 	ptyReceived := make(chan bool, 1)
-	
+
 	// Session context to track PTY dimensions and client reference
 	ctx := &sessionContext{
 		width:  0, // Will be set by pty-req
@@ -263,17 +263,17 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *s
 					if len(req.Payload) >= offset+8 {
 						ctx.mu.Lock()
 						// Parse columns (uint32, big-endian)
-						ctx.width = int(uint32(req.Payload[offset])<<24 | 
+						ctx.width = int(uint32(req.Payload[offset])<<24 |
 							uint32(req.Payload[offset+1])<<16 |
-							uint32(req.Payload[offset+2])<<8 | 
+							uint32(req.Payload[offset+2])<<8 |
 							uint32(req.Payload[offset+3]))
 						// Parse rows (uint32, big-endian)
-						ctx.height = int(uint32(req.Payload[offset+4])<<24 | 
+						ctx.height = int(uint32(req.Payload[offset+4])<<24 |
 							uint32(req.Payload[offset+5])<<16 |
-							uint32(req.Payload[offset+6])<<8 | 
+							uint32(req.Payload[offset+6])<<8 |
 							uint32(req.Payload[offset+7]))
 						ctx.mu.Unlock()
-						
+
 						// Signal that PTY dimensions are set
 						select {
 						case ptyReceived <- true:
@@ -293,15 +293,15 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *s
 			case "window-change":
 				// Parse window-change request to extract new dimensions
 				if len(req.Payload) >= 8 {
-					newWidth := int(uint32(req.Payload[0])<<24 | 
+					newWidth := int(uint32(req.Payload[0])<<24 |
 						uint32(req.Payload[1])<<16 |
-						uint32(req.Payload[2])<<8 | 
+						uint32(req.Payload[2])<<8 |
 						uint32(req.Payload[3]))
-					newHeight := int(uint32(req.Payload[4])<<24 | 
+					newHeight := int(uint32(req.Payload[4])<<24 |
 						uint32(req.Payload[5])<<16 |
-						uint32(req.Payload[6])<<8 | 
+						uint32(req.Payload[6])<<8 |
 						uint32(req.Payload[7]))
-					
+
 					ctx.mu.Lock()
 					ctx.width = newWidth
 					ctx.height = newHeight
@@ -387,7 +387,7 @@ func handleRegistration(channel ssh.Channel, username string, ctx *sessionContex
 	fmt.Fprintf(channel, "Welcome to schat!\n\n")
 
 	terminal := term.NewTerminal(channel, "")
-	
+
 	// Set terminal size from PTY request
 	ctx.mu.Lock()
 	terminal.SetSize(ctx.width, ctx.height)
@@ -510,12 +510,12 @@ func handleRegistration(channel ssh.Channel, username string, ctx *sessionContex
 // handleGuestUser creates a temporary guest user and joins them to a guest room
 func handleGuestUser(channel ssh.Channel, username string, guestRoomName string, ctx *sessionContext) {
 	// Channel is already wrapped in handleRegistration
-	
+
 	// Check if there's a banned guest with this nickname
 	var bannedGuest models.User
 	err := database.DB.Where("nickname = ? AND is_guest = ? AND is_banned = ? AND ban_expires_at > ?",
 		username, true, true, time.Now()).First(&bannedGuest).Error
-	
+
 	if err == nil {
 		// Found a banned guest with this nickname
 		fmt.Fprintf(channel, "\nYou are banned from guest access.\n")
@@ -527,7 +527,7 @@ func handleGuestUser(channel ssh.Channel, username string, guestRoomName string,
 
 	// Strip # prefix if present
 	guestRoomName = strings.TrimPrefix(guestRoomName, "#")
-	
+
 	// Get the guest room
 	var guestRoom models.Room
 	if err := database.DB.Where("name = ? AND is_guest_room = ?", guestRoomName, true).First(&guestRoom).Error; err != nil {
@@ -554,7 +554,7 @@ func handleGuestUser(channel ssh.Channel, username string, guestRoomName string,
 
 	// Create a unique guest username with timestamp to avoid collisions
 	guestUsername := fmt.Sprintf("guest_%s_%d", username, time.Now().UnixNano())
-	
+
 	// Create a temporary guest user
 	guestUser := &models.User{
 		Username:      guestUsername,
@@ -574,7 +574,7 @@ func handleGuestUser(channel ssh.Channel, username string, guestRoomName string,
 	}
 
 	fmt.Fprintf(channel, "\nJoining guest room '%s'...\n\n", guestRoomName)
-	
+
 	// Start guest session
 	handleGuestSession(channel, guestUser, &guestRoom, ctx)
 }
@@ -582,21 +582,21 @@ func handleGuestUser(channel ssh.Channel, username string, guestRoomName string,
 // handleGuestSession handles a guest user session (limited to their guest room only)
 func handleGuestSession(channel ssh.Channel, user *models.User, guestRoom *models.Room, ctx *sessionContext) {
 	// Channel is already wrapped in handleGuestUser or handleRegistration
-	
+
 	// Update last seen
 	user.LastSeenAt = time.Now()
 	database.DB.Save(user)
 
 	// Start reading input using term.Terminal for proper echo handling
 	terminal := term.NewTerminal(channel, "> ")
-	
+
 	// Set terminal size from PTY request
 	var width, height int
 	ctx.mu.Lock()
 	width = ctx.width
 	height = ctx.height
 	ctx.mu.Unlock()
-	
+
 	terminal.SetSize(width, height)
 
 	// Add client to server
@@ -606,14 +606,14 @@ func handleGuestSession(channel ssh.Channel, user *models.User, guestRoom *model
 		Terminal: terminal,
 		LastMsg:  time.Now(),
 	}
-	
+
 	// Set terminal dimensions on client and update ctx
 	ctx.mu.Lock()
 	client.TermWidth = width
 	client.TermHeight = height
 	ctx.client = client
 	ctx.mu.Unlock()
-	
+
 	server.mutex.Lock()
 	server.clients[user.ID] = client
 	server.mutex.Unlock()
@@ -624,20 +624,20 @@ func handleGuestSession(channel ssh.Channel, user *models.User, guestRoom *model
 		if displayName == "" {
 			displayName = user.Username
 		}
-		
+
 		if user.CurrentRoomID != nil {
 			var room models.Room
 			database.DB.First(&room, user.CurrentRoomID)
-			
+
 			// Broadcast to room users
 			broadcastToRoom(*user.CurrentRoomID, fmt.Sprintf("*** %s (guest) has left the chat", displayName), user.ID)
-			
+
 			// Notify all admins about guest leave (regardless of their current room)
-			sendNotificationToAdmins("user_left", 
-				fmt.Sprintf("Guest %s left #%s", displayName, room.Name), 
+			sendNotificationToAdmins("user_left",
+				fmt.Sprintf("Guest %s left #%s", displayName, room.Name),
 				&user.ID, user.CurrentRoomID)
 		}
-		
+
 		server.mutex.Lock()
 		delete(server.clients, user.ID)
 		server.mutex.Unlock()
@@ -669,12 +669,12 @@ func handleGuestSession(channel ssh.Channel, user *models.User, guestRoom *model
 	// Broadcast join message
 	if user.CurrentRoomID != nil {
 		broadcastToRoom(*user.CurrentRoomID, fmt.Sprintf("*** %s (guest) has joined the chat", displayName), user.ID)
-		
+
 		// Notify all admins about guest join (regardless of their current room)
 		var room models.Room
 		if err := database.DB.First(&room, user.CurrentRoomID).Error; err == nil {
-			sendNotificationToAdmins("user_joined", 
-				fmt.Sprintf("Guest %s joined #%s", displayName, room.Name), 
+			sendNotificationToAdmins("user_joined",
+				fmt.Sprintf("Guest %s joined #%s", displayName, room.Name),
 				&user.ID, user.CurrentRoomID)
 		}
 	}
@@ -705,21 +705,21 @@ func handleGuestSession(channel ssh.Channel, user *models.User, guestRoom *model
 
 func handleAuthenticatedUser(channel ssh.Channel, user *models.User, ctx *sessionContext) {
 	// Channel is already wrapped in handleSession or handleRegistration
-	
+
 	// Update last seen
 	user.LastSeenAt = time.Now()
 	database.DB.Save(user)
 
 	// Start reading input using term.Terminal for proper echo handling
 	terminal := term.NewTerminal(channel, "> ")
-	
+
 	// Set terminal size from PTY request
 	var width, height int
 	ctx.mu.Lock()
 	width = ctx.width
 	height = ctx.height
 	ctx.mu.Unlock()
-	
+
 	terminal.SetSize(width, height)
 
 	// Add client to server
@@ -729,14 +729,14 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User, ctx *sessio
 		Terminal: terminal,
 		LastMsg:  time.Now(),
 	}
-	
+
 	// Set terminal dimensions on client and update ctx
 	ctx.mu.Lock()
 	client.TermWidth = width
 	client.TermHeight = height
 	ctx.client = client
 	ctx.mu.Unlock()
-	
+
 	server.mutex.Lock()
 	server.clients[user.ID] = client
 	server.mutex.Unlock()
@@ -808,12 +808,12 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User, ctx *sessio
 	// Broadcast join message
 	if user.CurrentRoomID != nil {
 		broadcastToRoom(*user.CurrentRoomID, fmt.Sprintf("*** %s has joined the chat", displayName), user.ID)
-		
+
 		// Notify all admins about user join (regardless of their current room)
 		var room models.Room
 		if err := database.DB.First(&room, user.CurrentRoomID).Error; err == nil {
-			sendNotificationToAdmins("user_joined", 
-				fmt.Sprintf("%s joined #%s", displayName, room.Name), 
+			sendNotificationToAdmins("user_joined",
+				fmt.Sprintf("%s joined #%s", displayName, room.Name),
 				&user.ID, user.CurrentRoomID)
 		}
 	}
@@ -867,7 +867,7 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User, ctx *sessio
 			for _, u := range users {
 				completions = append(completions, "@"+u.Username)
 			}
-		} else if len(words) > 0 && (words[0] == "/join" || words[0] == "/j" || 
+		} else if len(words) > 0 && (words[0] == "/join" || words[0] == "/j" ||
 			words[0] == "/permanent" || words[0] == "/perm" || words[0] == "/makepermanent" ||
 			words[0] == "/hide" || words[0] == "/hideroom" ||
 			words[0] == "/unhide" || words[0] == "/unhideroom" || words[0] == "/show" ||
@@ -880,13 +880,13 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User, ctx *sessio
 				roomPrefix = roomPrefix[1:]
 			}
 			var rooms []models.Room
-			
+
 			// Filter hidden rooms for non-admins on /join
 			query := database.DB
 			if !user.IsAdmin && (words[0] == "/join" || words[0] == "/j") {
 				query = query.Where("is_hidden = ?", false)
 			}
-			
+
 			query.Find(&rooms)
 			for _, r := range rooms {
 				if strings.HasPrefix(strings.ToLower(r.Name), roomPrefix) {
@@ -999,13 +999,13 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User, ctx *sessio
 	if user.CurrentRoomID != nil {
 		var room models.Room
 		database.DB.First(&room, user.CurrentRoomID)
-		
+
 		// Broadcast to room users
 		broadcastToRoom(*user.CurrentRoomID, fmt.Sprintf("*** %s has left the chat", displayName), user.ID)
-		
+
 		// Notify all admins about user leave (regardless of their current room)
-		sendNotificationToAdmins("user_left", 
-			fmt.Sprintf("%s left #%s", displayName, room.Name), 
+		sendNotificationToAdmins("user_left",
+			fmt.Sprintf("%s left #%s", displayName, room.Name),
 			&user.ID, user.CurrentRoomID)
 	}
 }
@@ -1103,7 +1103,7 @@ func handleCommand(client *Client, line string) {
 				roomName := args[0]
 				var room models.Room
 				if err := database.DB.Where("name = ?", roomName).First(&room).Error; err == nil {
-					sendNotificationToAdmins("room_created", 
+					sendNotificationToAdmins("room_created",
 						fmt.Sprintf("Room created: %s by %s", roomName, client.User.Username),
 						&client.User.ID, &room.ID)
 				}
@@ -1142,11 +1142,11 @@ func handleCommand(client *Client, line string) {
 					}
 
 					// Notify previous room creator about user leaving
-					if previousRoom != nil && previousRoom.CreatorID != nil && 
+					if previousRoom != nil && previousRoom.CreatorID != nil &&
 						*previousRoom.CreatorID != client.User.ID &&
 						(client.User.CurrentRoomID == nil || previousRoom.ID != *client.User.CurrentRoomID) {
 						sendNotificationToUser(*previousRoom.CreatorID, "user_left_room",
-							fmt.Sprintf("%s left your room %s and went to %s", 
+							fmt.Sprintf("%s left your room %s and went to %s",
 								client.User.Username, previousRoom.Name, newRoom.Name),
 							&client.User.ID, &previousRoom.ID)
 					}
@@ -1398,9 +1398,9 @@ func qrCodeToUnicode(qr *qrcode.QRCode) string {
 // handleBroadcastInteractive handles the interactive broadcast scheduling
 func handleBroadcastInteractive(client *Client) {
 	fmt.Fprintf(client.Terminal, "\n=== Schedule Broadcast Message ===\n\n")
-	
+
 	originalPrompt := "> "
-	
+
 	// Get base time
 	client.Terminal.SetPrompt("Enter base time (YYYY-MM-DD HH:MM): ")
 	baseTimeStr, err := client.Terminal.ReadLine()
@@ -1410,7 +1410,7 @@ func handleBroadcastInteractive(client *Client) {
 		return
 	}
 	baseTimeStr = strings.TrimSpace(baseTimeStr)
-	
+
 	// Parse base time in local timezone
 	baseTime, err := time.ParseInLocation("2006-01-02 15:04", baseTimeStr, time.Local)
 	if err != nil {
@@ -1418,14 +1418,14 @@ func handleBroadcastInteractive(client *Client) {
 		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
-	
+
 	// Ensure base time is in the future
 	if baseTime.Before(time.Now()) {
 		fmt.Fprintf(client.Terminal, "\nBase time must be in the future.\n")
 		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
-	
+
 	// Get base time message
 	client.Terminal.SetPrompt("Enter message for base time: ")
 	baseMessage, err := client.Terminal.ReadLine()
@@ -1435,13 +1435,13 @@ func handleBroadcastInteractive(client *Client) {
 		return
 	}
 	baseMessage = strings.TrimSpace(baseMessage)
-	
+
 	if baseMessage == "" {
 		fmt.Fprintf(client.Terminal, "\nMessage cannot be empty.\n")
 		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
-	
+
 	// Create base time broadcast
 	baseBroadcast := models.BroadcastMessage{
 		CreatorID:    client.User.ID,
@@ -1452,10 +1452,10 @@ func handleBroadcastInteractive(client *Client) {
 		MinuteOffset: 0,
 		IsSent:       false,
 	}
-	
+
 	var broadcasts []models.BroadcastMessage
 	broadcasts = append(broadcasts, baseBroadcast)
-	
+
 	// Ask for reminders
 	fmt.Fprintf(client.Terminal, "\n")
 	for {
@@ -1467,11 +1467,11 @@ func handleBroadcastInteractive(client *Client) {
 			return
 		}
 		addReminder = strings.ToLower(strings.TrimSpace(addReminder))
-		
+
 		if addReminder != "y" && addReminder != "yes" {
 			break
 		}
-		
+
 		// Get offset
 		client.Terminal.SetPrompt("Enter minutes offset (negative for before, positive for after): ")
 		offsetStr, err := client.Terminal.ReadLine()
@@ -1481,13 +1481,13 @@ func handleBroadcastInteractive(client *Client) {
 			return
 		}
 		offsetStr = strings.TrimSpace(offsetStr)
-		
+
 		offset, err := strconv.Atoi(offsetStr)
 		if err != nil {
 			fmt.Fprintf(client.Terminal, "\nInvalid offset. Please enter a number.\n")
 			continue
 		}
-		
+
 		// Get reminder message
 		client.Terminal.SetPrompt("Enter reminder message: ")
 		reminderMsg, err := client.Terminal.ReadLine()
@@ -1497,21 +1497,21 @@ func handleBroadcastInteractive(client *Client) {
 			return
 		}
 		reminderMsg = strings.TrimSpace(reminderMsg)
-		
+
 		if reminderMsg == "" {
 			fmt.Fprintf(client.Terminal, "\nMessage cannot be empty.\n")
 			continue
 		}
-		
+
 		// Calculate scheduled time
 		scheduledAt := baseTime.Add(time.Duration(offset) * time.Minute)
-		
+
 		// Ensure scheduled time is in the future
 		if scheduledAt.Before(time.Now()) {
 			fmt.Fprintf(client.Terminal, "\nScheduled time would be in the past. Skipping.\n")
 			continue
 		}
-		
+
 		reminder := models.BroadcastMessage{
 			CreatorID:    client.User.ID,
 			BaseTime:     baseTime,
@@ -1521,11 +1521,11 @@ func handleBroadcastInteractive(client *Client) {
 			MinuteOffset: offset,
 			IsSent:       false,
 		}
-		
+
 		broadcasts = append(broadcasts, reminder)
 		fmt.Fprintf(client.Terminal, "Reminder added for %s\n", scheduledAt.Format("2006-01-02 15:04:05"))
 	}
-	
+
 	// Save all broadcasts
 	for _, broadcast := range broadcasts {
 		if err := database.DB.Create(&broadcast).Error; err != nil {
@@ -1534,13 +1534,13 @@ func handleBroadcastInteractive(client *Client) {
 			return
 		}
 	}
-	
+
 	fmt.Fprintf(client.Terminal, "\nBroadcast scheduled successfully!\n")
 	fmt.Fprintf(client.Terminal, "Base time: %s\n", baseTime.Format("2006-01-02 15:04:05"))
 	fmt.Fprintf(client.Terminal, "Total messages: %d\n\n", len(broadcasts))
-	
+
 	client.Terminal.SetPrompt(originalPrompt)
-	
+
 	logAction(client.User, "schedule_broadcast", fmt.Sprintf("Scheduled %d broadcast message(s)", len(broadcasts)))
 }
 
@@ -1549,9 +1549,9 @@ func handleSignupInteractive(client *Client) {
 	fmt.Fprintf(client.Terminal, "\n=== Convert Guest to Full Account ===\n\n")
 	fmt.Fprintf(client.Terminal, "You are currently logged in as guest: %s\n", client.User.Nickname)
 	fmt.Fprintf(client.Terminal, "Let's create a permanent account for you.\n\n")
-	
+
 	originalPrompt := "> "
-	
+
 	// Get desired username
 	client.Terminal.SetPrompt("Enter your desired username: ")
 	username, err := client.Terminal.ReadLine()
@@ -1561,13 +1561,13 @@ func handleSignupInteractive(client *Client) {
 		return
 	}
 	username = strings.TrimSpace(username)
-	
+
 	if username == "" {
 		fmt.Fprintf(client.Terminal, "\nUsername cannot be empty.\n")
 		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
-	
+
 	// Check if username already exists
 	var existingUser models.User
 	if err := database.DB.Where("username = ?", username).First(&existingUser).Error; err == nil {
@@ -1575,13 +1575,13 @@ func handleSignupInteractive(client *Client) {
 		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
-	
+
 	// Choose authentication method
 	fmt.Fprintf(client.Terminal, "\nChoose authentication method:\n")
 	fmt.Fprintf(client.Terminal, "1. Password\n")
 	fmt.Fprintf(client.Terminal, "2. SSH Key\n")
 	client.Terminal.SetPrompt("Enter choice (1 or 2): ")
-	
+
 	choice, err := client.Terminal.ReadLine()
 	if err != nil {
 		fmt.Fprintf(client.Terminal, "\nError reading input: %v\n", err)
@@ -1589,9 +1589,9 @@ func handleSignupInteractive(client *Client) {
 		return
 	}
 	choice = strings.TrimSpace(choice)
-	
+
 	var password, sshKey string
-	
+
 	if choice == "1" {
 		client.Terminal.SetPrompt("\nEnter password (visible): ")
 		line, err := client.Terminal.ReadLine()
@@ -1601,7 +1601,7 @@ func handleSignupInteractive(client *Client) {
 			return
 		}
 		password = strings.TrimSpace(line)
-		
+
 		if password == "" {
 			fmt.Fprintf(client.Terminal, "Password cannot be empty\n")
 			client.Terminal.SetPrompt(originalPrompt)
@@ -1627,7 +1627,7 @@ func handleSignupInteractive(client *Client) {
 			}
 		}
 		sshKey = strings.Join(keyLines, " ")
-		
+
 		if sshKey == "" {
 			fmt.Fprintf(client.Terminal, "SSH key cannot be empty\n")
 			client.Terminal.SetPrompt(originalPrompt)
@@ -1638,11 +1638,11 @@ func handleSignupInteractive(client *Client) {
 		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
-	
+
 	// Update the guest user to become a full user
 	client.User.Username = username
 	client.User.IsGuest = false
-	
+
 	if password != "" {
 		hashedPassword, err := auth.HashPassword(password)
 		if err != nil {
@@ -1652,7 +1652,7 @@ func handleSignupInteractive(client *Client) {
 		}
 		client.User.PasswordHash = hashedPassword
 	}
-	
+
 	if sshKey != "" {
 		// Validate SSH key format
 		_, _, _, _, err := ssh.ParseAuthorizedKey([]byte(sshKey))
@@ -1663,20 +1663,20 @@ func handleSignupInteractive(client *Client) {
 		}
 		client.User.SSHKey = sshKey
 	}
-	
+
 	// Save the updated user
 	if err := database.DB.Save(client.User).Error; err != nil {
 		fmt.Fprintf(client.Terminal, "\nFailed to create account: %v\n", err)
 		client.Terminal.SetPrompt(originalPrompt)
 		return
 	}
-	
+
 	fmt.Fprintf(client.Terminal, "\nAccount created successfully!\n")
 	fmt.Fprintf(client.Terminal, "You are now a full user: %s\n", username)
 	fmt.Fprintf(client.Terminal, "You can now access all rooms and features.\n\n")
-	
+
 	client.Terminal.SetPrompt(originalPrompt)
-	
+
 	logAction(client.User, "signup", fmt.Sprintf("Guest %s converted to user %s", client.User.Nickname, username))
 }
 
@@ -1944,7 +1944,7 @@ func handleGuestCommand(client *Client, line string) {
 			displayName = client.User.Username
 		}
 		message := fmt.Sprintf("* %s (guest) %s", displayName, action)
-		
+
 		// Save to database
 		chatMsg := models.ChatMessage{
 			UserID:  client.User.ID,
@@ -1952,13 +1952,13 @@ func handleGuestCommand(client *Client, line string) {
 			Content: action,
 		}
 		database.DB.Create(&chatMsg)
-		
+
 		// Update room activity timestamp
 		if client.User.CurrentRoomID != nil {
 			database.DB.Model(&models.Room{}).Where("id = ?", *client.User.CurrentRoomID).
 				Update("last_activity_at", time.Now())
 		}
-		
+
 		// Broadcast
 		if client.User.CurrentRoomID != nil {
 			broadcastToRoom(*client.User.CurrentRoomID, message, client.User.ID)
@@ -2133,7 +2133,7 @@ func cleanupEmptyRooms() {
 		// Count users in this room
 		var userCount int64
 		database.DB.Model(&models.User{}).Where("current_room_id = ?", room.ID).Count(&userCount)
-		
+
 		if userCount == 0 {
 			// No users in this room, delete it
 			if err := database.DB.Delete(&room).Error; err != nil {
@@ -2150,7 +2150,7 @@ func cleanupEmptyRooms() {
 func cleanupExpiredRooms() {
 	ticker := time.NewTicker(30 * time.Second) // Check every 30 seconds
 	defer ticker.Stop()
-	
+
 	// Track which rooms have already been warned
 	warnedRooms := make(map[uint]bool)
 
@@ -2160,7 +2160,7 @@ func cleanupExpiredRooms() {
 		// Find rooms expiring in 2 minutes (for warnings)
 		twoMinutesFromNow := now.Add(2 * time.Minute)
 		var soonExpiringRooms []models.Room
-		if err := database.DB.Where("expires_at IS NOT NULL AND expires_at > ? AND expires_at <= ? AND is_permanent = ? AND is_guest_room = ?", 
+		if err := database.DB.Where("expires_at IS NOT NULL AND expires_at > ? AND expires_at <= ? AND is_permanent = ? AND is_guest_room = ?",
 			now, twoMinutesFromNow, false, true).
 			Find(&soonExpiringRooms).Error; err != nil {
 			log.Printf("Error fetching soon-expiring rooms: %v", err)
@@ -2172,22 +2172,22 @@ func cleanupExpiredRooms() {
 				if warnedRooms[room.ID] {
 					continue
 				}
-				
+
 				// Mark as warned
 				warnedRooms[room.ID] = true
-				
+
 				// Find all users in this room
 				var users []models.User
 				if err := database.DB.Where("current_room_id = ?", room.ID).Find(&users).Error; err != nil {
 					log.Printf("Error fetching users in soon-expiring room %s: %v", room.Name, err)
 					continue
 				}
-				
+
 				// Warn all online users
 				for _, user := range users {
 					if client, ok := server.clients[user.ID]; ok {
 						client.Mutex.Lock()
-						client.Terminal.Write([]byte(fmt.Sprintf("\n*** WARNING: Guest room #%s will expire in 2 minutes at %s ***\n", 
+						client.Terminal.Write([]byte(fmt.Sprintf("\n*** WARNING: Guest room #%s will expire in 2 minutes at %s ***\n",
 							room.Name, room.ExpiresAt.Format("15:04:05"))))
 						client.Mutex.Unlock()
 					}
@@ -2208,7 +2208,7 @@ func cleanupExpiredRooms() {
 		for _, room := range expiredRooms {
 			// Remove from warned rooms if it was there
 			delete(warnedRooms, room.ID)
-			
+
 			// Find all users in this room
 			var users []models.User
 			if err := database.DB.Where("current_room_id = ?", room.ID).Find(&users).Error; err != nil {
@@ -2238,13 +2238,13 @@ func cleanupExpiredRooms() {
 							log.Printf("Error finding general room: %v", err)
 							continue
 						}
-						
+
 						user.CurrentRoomID = &generalRoom.ID
 						if err := database.DB.Save(&user).Error; err != nil {
 							log.Printf("Error moving user %s from expired room: %v", user.Username, err)
 							continue
 						}
-						
+
 						// Notify user if they are online
 						if client, ok := server.clients[user.ID]; ok {
 							client.Mutex.Lock()
@@ -2383,7 +2383,7 @@ func broadcastScheduler() {
 		// Send broadcasts to all users
 		for _, broadcast := range broadcasts {
 			message := fmt.Sprintf("\n*** BROADCAST *** %s\n", broadcast.Message)
-			
+
 			server.mutex.RLock()
 			for _, client := range server.clients {
 				client.Mutex.Lock()
