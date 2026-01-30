@@ -423,8 +423,14 @@ func handleRegistration(channel ssh.Channel, username string, ctx *sessionContex
 	}
 	choice = strings.TrimSpace(choice)
 
+	// Empty choice is invalid
+	if choice == "" {
+		fmt.Fprintf(channel, "Invalid choice. Please enter 1, 2, or a guest room name.\n")
+		return
+	}
+
 	// Guest access - if choice is not "1" or "2", treat as guest room name
-	if choice != "" && choice != "1" && choice != "2" {
+	if choice != "1" && choice != "2" {
 		handleGuestUser(channel, username, choice, ctx)
 		return
 	}
@@ -470,7 +476,7 @@ func handleRegistration(channel ssh.Channel, username string, ctx *sessionContex
 			return
 		}
 	} else {
-		fmt.Fprintf(channel, "Invalid choice. Please enter 1, 2, or press Enter for guest access.\n")
+		fmt.Fprintf(channel, "Invalid choice. Please enter 1, 2, or a guest room name.\n")
 		return
 	}
 
