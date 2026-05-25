@@ -369,7 +369,26 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *s
 				return
 			}
 			if err := database.DB.First(&user, userID).Error; err == nil {
-				// User is authenticated
+				// If still pending approval, re-enter the wait loop instead of chat
+				if user.IsPendingApproval {
+					fmt.Fprintf(normalizedChan, "\nYour registration is still pending admin approval.\n")
+					fmt.Fprintf(normalizedChan, "Please wait. You will be connected automatically once approved.\n\n")
+					approved := waitForApproval(normalizedChan, user.ID)
+					if !approved {
+						fmt.Fprintf(normalizedChan, "\nYour registration was denied by an admin.\n")
+						return
+					}
+					// Reload and connect
+					var approvedUser models.User
+					if err := database.DB.First(&approvedUser, user.ID).Error; err != nil {
+						fmt.Fprintf(normalizedChan, "\nError loading your account. Please reconnect.\n")
+						return
+					}
+					fmt.Fprintf(normalizedChan, "\nYour registration has been approved! Connecting...\n\n")
+					handleAuthenticatedUser(normalizedChan, &approvedUser, ctx)
+					return
+				}
+				// User is authenticated and approved
 				handleAuthenticatedUser(normalizedChan, user, ctx)
 				return
 			}
