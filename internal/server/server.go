@@ -2717,7 +2717,7 @@ func showChatHistory(channel ssh.Channel, user *models.User) {
 		Find(&messages)
 
 	if len(messages) == 0 {
-		fmt.Fprintf(channel, "--- No recent messages ---\n\n")
+		fmt.Fprintf(channel, "--- No recent messages ---\r\n\r\n")
 		return
 	}
 
@@ -2733,16 +2733,16 @@ func showChatHistory(channel ssh.Channel, user *models.User) {
 		content := msg.Content
 		if strings.HasPrefix(content, "@me ") {
 			// Emote
-			fmt.Fprintf(channel, "* %s %s\n", displayName, content[4:])
+			fmt.Fprintf(channel, "* %s %s\r\n", displayName, content[4:])
 		} else if strings.Contains(content, "@me") {
 			// Inline @me
-			fmt.Fprintf(channel, "%s\n", strings.ReplaceAll(content, "@me", displayName))
+			fmt.Fprintf(channel, "%s\r\n", strings.ReplaceAll(content, "@me", displayName))
 		} else {
 			// Normal message
-			fmt.Fprintf(channel, "%s: %s\n", displayName, content)
+			fmt.Fprintf(channel, "%s: %s\r\n", displayName, content)
 		}
 	}
-	fmt.Fprintf(channel, "\n")
+	fmt.Fprintf(channel, "\r\n")
 }
 
 func showUnreadNotifications(channel ssh.Channel, user *models.User) {
