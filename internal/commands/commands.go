@@ -819,6 +819,9 @@ func handleCreateGuestRoom(user *models.User, args []string) (string, error) {
 			if duration < 2*time.Minute {
 				return "", fmt.Errorf("expiration time must be at least 2 minutes")
 			}
+			if duration > maxDuration {
+				return "", fmt.Errorf("expiration time must be at most %v", maxDuration)
+			}
 			expireTime := time.Now().Add(duration)
 			expiresAt = &expireTime
 			i += 2
@@ -1187,7 +1190,9 @@ func handleBan(user *models.User, args []string) (string, error) {
 		ExpiresAt:  expiresAt,
 		IsActive:   true,
 	}
-	database.DB.Create(&ban)
+	if err := database.DB.Create(&ban).Error; err != nil {
+		log.Printf("Warning: failed to create ban record for %s: %v", username, err)
+	}
 
 	userType := "user"
 	if targetUser.IsGuest {
@@ -1243,7 +1248,9 @@ func handleMute(user *models.User, args []string) (string, error) {
 		ExpiresAt: expiresAt,
 		IsActive:  true,
 	}
-	database.DB.Create(&mute)
+	if err := database.DB.Create(&mute).Error; err != nil {
+		log.Printf("Warning: failed to create mute record for %s: %v", username, err)
+	}
 
 	logAction(user, "mute", fmt.Sprintf("Muted %s for %s: %s", username, durationStr, reason))
 
@@ -2125,17 +2132,17 @@ func handleGarbageCollect(user *models.User, args []string) (string, error) {
 	// 6. Clean up inactive notifications
 	thirtyDaysAgo := time.Now().AddDate(0, 0, -30)
 	var oldNotifications int64
-	database.DB.Unscoped().Where("created_at < ? AND is_read = ?", thirtyDaysAgo, true).Delete(&models.Notification{}).Count(&oldNotifications)
-	if oldNotifications > 0 {
-		result.WriteString(fmt.Sprintf("✓ Deleted %d old notifications\n", oldNotifications))
+	notifResult := database.DB.Unscoped().Where("created_at < ? AND is_read = ?", thirtyDaysAgo, true).Delete(&models.Notification{})
+	if notifResult.RowsAffected > 0 {
+		result.WriteString(fmt.Sprintf("✓ Deleted %d old notifications\n", notifResult.RowsAffected))
 	}
 
 	// 7. Clean up old audit logs (older than 90 days)
 	ninetyDaysAgo := time.Now().AddDate(0, 0, -90)
 	var oldAuditLogs int64
-	database.DB.Unscoped().Where("created_at < ?", ninetyDaysAgo).Delete(&models.AuditLog{}).Count(&oldAuditLogs)
-	if oldAuditLogs > 0 {
-		result.WriteString(fmt.Sprintf("✓ Deleted %d old audit logs\n", oldAuditLogs))
+	auditResult := database.DB.Unscoped().Where("created_at < ?", ninetyDaysAgo).Delete(&models.AuditLog{})
+	if auditResult.RowsAffected > 0 {
+		result.WriteString(fmt.Sprintf("✓ Deleted %d old audit logs\n", auditResult.RowsAffected))
 	}
 
 	logAction(user, "gc", "Ran garbage collection")

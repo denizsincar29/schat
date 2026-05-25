@@ -70,12 +70,10 @@ func init() {
 // existing \r\n sequences. This is necessary for proper terminal display when
 // the PTY is in raw mode.
 func normalizeNewlines(s string) string {
-	// Replace all \r\n with placeholder to avoid double-conversion
-	s = strings.ReplaceAll(s, "\r\n", "\x00")
-	// Replace all remaining \n with \r\n
+	// Normalize existing \r\n -> \n first, then \n -> \r\n.
+	// This is simpler and avoids the \x00 placeholder collision bug.
+	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\n", "\r\n")
-	// Restore the placeholder back to \r\n
-	s = strings.ReplaceAll(s, "\x00", "\r\n")
 	return s
 }
 
@@ -258,7 +256,7 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, sshConn *s
 				if len(req.Payload) >= 8 {
 					// PTY request format: string term, uint32 columns, uint32 rows, uint32 width_px, uint32 height_px, string modes
 					// Skip the term string length (4 bytes) and the term string itself
-					termLen := int(req.Payload[3])
+					termLen := int(uint32(req.Payload[0])<<24 | uint32(req.Payload[1])<<16 | uint32(req.Payload[2])<<8 | uint32(req.Payload[3]))
 					offset := 4 + termLen
 					if len(req.Payload) >= offset+8 {
 						ctx.mu.Lock()
@@ -979,7 +977,8 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User, ctx *sessio
 			continue
 		}
 
-		// Check if user is muted
+		// Check if user is muted - refresh from DB to catch mutes applied after login
+		database.DB.First(client.User, client.User.ID)
 		if user.IsMuted && user.MuteExpiresAt != nil && user.MuteExpiresAt.After(time.Now()) {
 			if !strings.HasPrefix(line, "/") {
 				fmt.Fprintf(client.Terminal, "You are muted until %s\n", user.MuteExpiresAt.Format("2006-01-02 15:04:05"))
@@ -998,14 +997,18 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User, ctx *sessio
 	// Broadcast leave message
 	if user.CurrentRoomID != nil {
 		var room models.Room
-		database.DB.First(&room, user.CurrentRoomID)
+		// Bug fix: check error so room.Name is not empty on failed fetch
+		roomName := "unknown"
+		if err := database.DB.First(&room, user.CurrentRoomID).Error; err == nil {
+			roomName = room.Name
+		}
 
 		// Broadcast to room users
 		broadcastToRoom(*user.CurrentRoomID, fmt.Sprintf("*** %s has left the chat", displayName), user.ID)
 
 		// Notify all admins about user leave (regardless of their current room)
 		sendNotificationToAdmins("user_left",
-			fmt.Sprintf("%s left #%s", displayName, room.Name),
+			fmt.Sprintf("%s left #%s", displayName, roomName),
 			&user.ID, user.CurrentRoomID)
 	}
 }

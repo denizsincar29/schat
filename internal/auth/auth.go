@@ -73,8 +73,15 @@ func AuthenticateUser(username string, password string, publicKey ssh.PublicKey)
 	}
 
 	// Check if user is banned
-	if user.IsBanned && user.BanExpiresAt != nil && user.BanExpiresAt.After(time.Now()) {
-		return nil, fmt.Errorf("user is banned until %s", user.BanExpiresAt.Format("2006-01-02 15:04:05"))
+	// Bug fix: also block login when IsBanned is true but BanExpiresAt is nil (permanent ban)
+	if user.IsBanned {
+		if user.BanExpiresAt == nil {
+			return nil, fmt.Errorf("user is permanently banned")
+		}
+		if user.BanExpiresAt.After(time.Now()) {
+			return nil, fmt.Errorf("user is banned until %s", user.BanExpiresAt.Format("2006-01-02 15:04:05"))
+		}
+		// Ban has expired; fall through to allow login
 	}
 
 	// Try SSH key authentication first
