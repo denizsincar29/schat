@@ -490,19 +490,104 @@ func handleRegistration(channel ssh.Channel, username string, ctx *sessionContex
 		return
 	}
 
-	if isFirstUser {
-		fmt.Fprintf(channel, "\nRegistration successful! You are the first user and have been granted admin privileges.\n")
-	} else {
-		fmt.Fprintf(channel, "\nRegistration successful!\n")
-		// Notify all admins about new user registration
-		sendNotificationToAdmins("user_registered", fmt.Sprintf("New user registered: %s", username), &newUser.ID, nil)
-	}
-
 	logAction(newUser, "register", "User registered")
 
-	// Immediately authenticate and proceed to chat without reconnection
+	if isFirstUser {
+		fmt.Fprintf(channel, "\nRegistration successful! You are the first user and have been granted admin privileges.\n")
+		fmt.Fprintf(channel, "Connecting to chat...\n\n")
+		handleAuthenticatedUser(channel, newUser, ctx)
+		return
+	}
+
+	// Check if admin approval is required for new registrations
+	var approvalSetting models.Settings
+	requireApproval := false
+	if err := database.DB.Where("key = ?", "require_registration_approval").First(&approvalSetting).Error; err == nil {
+		requireApproval = approvalSetting.Value == "true"
+	}
+
+	if requireApproval {
+		// Mark user as pending approval
+		newUser.IsPendingApproval = true
+		database.DB.Save(newUser)
+
+		// Create pending registration record
+		pendingReg := models.PendingRegistration{
+			UserID:   newUser.ID,
+			Username: newUser.Username,
+		}
+		database.DB.Create(&pendingReg)
+
+		// Notify all admins
+		sendNotificationToAdmins("registration_pending",
+			fmt.Sprintf("New registration pending approval: %s (use /approveuser @%s or /denyuser @%s)", username, username, username),
+			&newUser.ID, nil)
+
+		fmt.Fprintf(channel, "\nYour registration is pending admin approval.\n")
+		fmt.Fprintf(channel, "Please wait. You will be connected automatically once approved.\n")
+		fmt.Fprintf(channel, "This may take a while. Press Ctrl+C to disconnect and try later.\n\n")
+
+		// Poll for approval (check every 5 seconds, timeout after 30 minutes)
+		approved := waitForApproval(channel, newUser.ID)
+		if !approved {
+			// Timed out or denied - clean up
+			var stillPending models.User
+			if database.DB.First(&stillPending, newUser.ID).Error == nil && stillPending.IsPendingApproval {
+				// Was never approved/denied - just disconnect
+				fmt.Fprintf(channel, "\nApproval timed out. Please reconnect to try again.\n")
+			} else {
+				// Was explicitly denied
+				fmt.Fprintf(channel, "\nYour registration was denied by an admin.\n")
+			}
+			return
+		}
+
+		// Approved - reload user and connect
+		var approvedUser models.User
+		if err := database.DB.First(&approvedUser, newUser.ID).Error; err != nil {
+			fmt.Fprintf(channel, "\nError loading your account. Please reconnect.\n")
+			return
+		}
+		fmt.Fprintf(channel, "\nYour registration has been approved! Connecting...\n\n")
+		handleAuthenticatedUser(channel, &approvedUser, ctx)
+		return
+	}
+
+	// No approval required - connect immediately
+	fmt.Fprintf(channel, "\nRegistration successful!\n")
+	sendNotificationToAdmins("user_registered", fmt.Sprintf("New user registered: %s", username), &newUser.ID, nil)
 	fmt.Fprintf(channel, "Connecting to chat...\n\n")
 	handleAuthenticatedUser(channel, newUser, ctx)
+}
+
+// waitForApproval polls the DB until the user is approved, denied, or timeout occurs.
+// Returns true if approved, false if denied or timed out.
+func waitForApproval(channel ssh.Channel, userID uint) bool {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	timeout := time.NewTimer(30 * time.Minute)
+	defer timeout.Stop()
+
+	dots := 0
+	for {
+		select {
+		case <-ticker.C:
+			var u models.User
+			if err := database.DB.First(&u, userID).Error; err != nil {
+				// User was deleted (denied and removed)
+				return false
+			}
+			if !u.IsPendingApproval {
+				// No longer pending - check if it's a real approval
+				// (IsPendingApproval cleared = approved; user deleted = denied)
+				return !u.IsBanned // banned on denial, approved otherwise
+			}
+			dots = (dots + 1) % 4
+			fmt.Fprintf(channel, "\rWaiting for admin approval%s   ", strings.Repeat(".", dots))
+		case <-timeout.C:
+			return false
+		}
+	}
 }
 
 // handleGuestUser creates a temporary guest user and joins them to a guest room
@@ -870,7 +955,11 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User, ctx *sessio
 			words[0] == "/hide" || words[0] == "/hideroom" ||
 			words[0] == "/unhide" || words[0] == "/unhideroom" || words[0] == "/show" ||
 			words[0] == "/move" || words[0] == "/moveuser" ||
-			words[0] == "/setpassword" || words[0] == "/roompassword" || words[0] == "/setpass") && len(words) <= 2 {
+			words[0] == "/setpassword" || words[0] == "/roompassword" || words[0] == "/setpass" ||
+			words[0] == "/setwaitroom" || words[0] == "/waitroom" ||
+			words[0] == "/setoperator" || words[0] == "/operator" || words[0] == "/roomop" ||
+			words[0] == "/pendingknocks" || words[0] == "/knocks" || words[0] == "/waitlist" ||
+			words[0] == "/deleteroom" || words[0] == "/delroom") && len(words) <= 2 {
 			// Room name completion after room-related commands
 			roomPrefix := strings.ToLower(wordToComplete)
 			// Strip # prefix if present for matching
@@ -924,6 +1013,9 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User, ctx *sessio
 						"unmute": true, "um": true, "promote": true, "makeadmin": true,
 						"demote": true, "removeadmin": true, "deleteuser": true,
 						"deluser": true, "removeuser": true, "report": true, "reportuser": true,
+						"approveuser": true, "approve": true, "denyuser": true, "deny": true, "rejectuser": true,
+						"admit": true, "allowin": true, "letin": true,
+						"denyknock": true, "reject": true, "turnaway": true,
 					}
 					if usernameCommands[cmdName] {
 						// Ensure @ prefix for username completion
@@ -1159,11 +1251,148 @@ func handleCommand(client *Client, line string) {
 	}
 
 	if result != "" {
+		// Check if command returned a WAITROOM sentinel (interactive knock flow)
+		if strings.HasPrefix(result, "WAITROOM:") {
+			roomIDStr := strings.TrimPrefix(result, "WAITROOM:")
+			var roomID uint
+			if n, err := fmt.Sscanf(roomIDStr, "%d", &roomID); err == nil && n == 1 {
+				handleWaitroomKnock(client, roomID)
+				return
+			}
+		}
 		// Check if it's an emote
 		if strings.HasPrefix(result, "@me ") {
 			handleMessage(client, result)
 		} else {
 			fmt.Fprintf(client.Terminal, "%s\n", result)
+		}
+	}
+}
+
+// handleWaitroomKnock creates a knock record and holds the terminal
+// until the room operator admits or denies the user.
+func handleWaitroomKnock(client *Client, roomID uint) {
+	var room models.Room
+	if err := database.DB.First(&room, roomID).Error; err != nil {
+		fmt.Fprintf(client.Terminal, "Error: room not found.\n")
+		return
+	}
+
+	// Prevent double-knocking
+	var existing models.RoomKnock
+	if database.DB.Where("user_id = ? AND room_id = ? AND is_handled = ?", client.User.ID, roomID, false).First(&existing).Error == nil {
+		fmt.Fprintf(client.Terminal, "You are already waiting to enter #%s.\n", room.Name)
+		return
+	}
+
+	// Optional knock message
+	fmt.Fprintf(client.Terminal, "\n*** Room #%s has a waitroom. You need to knock. ***\n", room.Name)
+	fmt.Fprintf(client.Terminal, "Enter a message for the operator (or press Enter to skip): ")
+	client.Terminal.SetPrompt("")
+	message, _ := client.Terminal.ReadLine()
+	message = strings.TrimSpace(message)
+
+	// Create knock record
+	knock := models.RoomKnock{
+		UserID:  client.User.ID,
+		RoomID:  roomID,
+		Message: message,
+	}
+	if err := database.DB.Create(&knock).Error; err != nil {
+		fmt.Fprintf(client.Terminal, "Error creating knock: %v\n", err)
+		client.Terminal.SetPrompt("> ")
+		return
+	}
+
+	displayName := client.User.Username
+	if client.User.Nickname != "" {
+		displayName = client.User.Nickname
+	}
+
+	// Notify room operator / creator / admins
+	notifyMsg := fmt.Sprintf("*** %s is knocking on #%s", displayName, room.Name)
+	if message != "" {
+		notifyMsg += fmt.Sprintf(": \"%s\"", message)
+	}
+	notifyMsg += " \xe2\x80\x94 use /admit @" + client.User.Username + " to let them in ***"
+	notifyOperator(room, notifyMsg, client.User.ID)
+
+	fmt.Fprintf(client.Terminal, "\nYou are now waiting to enter #%s.\n", room.Name)
+	fmt.Fprintf(client.Terminal, "The room operator has been notified. Press Ctrl+C to cancel.\n\n")
+
+	// Poll for operator response (every 3 s, timeout 15 min)
+	admitted := waitForKnockDecision(client.Terminal, knock.ID)
+
+	// Restore prompt
+	client.Terminal.SetPrompt("> ")
+
+	if admitted {
+		database.DB.First(client.User, client.User.ID)
+		fmt.Fprintf(client.Terminal, "\n*** You have been admitted to #%s! ***\n\n", room.Name)
+		showChatHistory(client.Conn, client.User)
+		broadcastToRoom(roomID, fmt.Sprintf("*** %s has joined the room", displayName), client.User.ID)
+	} else {
+		fmt.Fprintf(client.Terminal, "\n*** Your request to enter #%s was denied. ***\n\n", room.Name)
+	}
+}
+
+// waitForKnockDecision polls until the knock is handled. Returns true if admitted.
+func waitForKnockDecision(terminal *term.Terminal, knockID uint) bool {
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+	timeoutTimer := time.NewTimer(15 * time.Minute)
+	defer timeoutTimer.Stop()
+
+	dots := 0
+	for {
+		select {
+		case <-ticker.C:
+			var knock models.RoomKnock
+			if err := database.DB.First(&knock, knockID).Error; err != nil {
+				return false
+			}
+			if knock.IsHandled {
+				return knock.IsAdmitted
+			}
+			dots = (dots + 1) % 4
+			fmt.Fprintf(terminal, "\rWaiting for operator%s   ", strings.Repeat(".", dots))
+		case <-timeoutTimer.C:
+			database.DB.Model(&models.RoomKnock{}).Where("id = ?", knockID).
+				Updates(map[string]interface{}{"is_handled": true, "is_admitted": false})
+			fmt.Fprintf(terminal, "\nKnock timed out (15 min).\n")
+			return false
+		}
+	}
+}
+
+// notifyOperator delivers a real-time message to the room operator, creator, and admins.
+func notifyOperator(room models.Room, message string, excludeUserID uint) {
+	notifyIDs := make(map[uint]bool)
+	if room.OperatorID != nil {
+		notifyIDs[*room.OperatorID] = true
+	}
+	if room.CreatorID != nil {
+		notifyIDs[*room.CreatorID] = true
+	}
+	var admins []models.User
+	database.DB.Where("is_admin = ?", true).Find(&admins)
+	for _, a := range admins {
+		notifyIDs[a.ID] = true
+	}
+
+	server.mutex.RLock()
+	defer server.mutex.RUnlock()
+	for uid := range notifyIDs {
+		if uid == excludeUserID {
+			continue
+		}
+		if c, ok := server.clients[uid]; ok {
+			c.Mutex.Lock()
+			c.Terminal.Write([]byte("\n" + message + "\n"))
+			if c.User.BellEnabled {
+				c.Terminal.Write([]byte("\a"))
+			}
+			c.Mutex.Unlock()
 		}
 	}
 }

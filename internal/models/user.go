@@ -20,6 +20,7 @@ type User struct {
 	CurrentRoom   *Room `gorm:"foreignKey:CurrentRoomID"`
 	DefaultRoomID *uint `gorm:"constraint:OnDelete:SET NULL;"`
 	DefaultRoom   *Room `gorm:"foreignKey:DefaultRoomID"`
+	IsPendingApproval bool  `gorm:"default:false"` // Awaiting admin approval
 	IsBanned      bool  `gorm:"default:false"`
 	BanExpiresAt  *time.Time
 	IsMuted       bool `gorm:"default:false"`
@@ -37,6 +38,9 @@ type Room struct {
 	IsGuestRoom     bool `gorm:"default:false"` // Guest rooms allow unauthenticated access
 	CreatorID       *uint
 	Creator         *User  `gorm:"foreignKey:CreatorID;constraint:OnDelete:SET NULL;"`
+	OperatorID      *uint  // Explicit room operator (overrides creator)
+	Operator        *User  `gorm:"foreignKey:OperatorID;constraint:OnDelete:SET NULL;"`
+	HasWaitroom     bool   `gorm:"default:false"` // Require knock to enter
 	Password        string // Password for passworded rooms (hashed)
 	LastActivityAt  time.Time
 	MaxParticipants *int       // Maximum number of participants (nil = unlimited)
@@ -132,4 +136,26 @@ type BroadcastMessage struct {
 	Message      string    `gorm:"type:text;not null"`
 	IsSent       bool      `gorm:"default:false"`
 	MinuteOffset int       // Minutes relative to BaseTime (negative = before, positive = after)
+}
+
+// PendingRegistration holds users awaiting admin approval
+type PendingRegistration struct {
+	gorm.Model
+	UserID    uint
+	User      User   `gorm:"foreignKey:UserID"`
+	Username  string `gorm:"not null"`
+	Message   string `gorm:"type:text"` // Optional message from the applicant
+	IsHandled bool   `gorm:"default:false"`
+}
+
+// RoomKnock holds users waiting to be admitted to a waitroom
+type RoomKnock struct {
+	gorm.Model
+	UserID    uint
+	User      User `gorm:"foreignKey:UserID"`
+	RoomID    uint
+	Room      Room   `gorm:"foreignKey:RoomID"`
+	Message   string `gorm:"type:text"` // Optional knock message
+	IsHandled bool   `gorm:"default:false"`
+	IsAdmitted bool  `gorm:"default:false"` // true = admitted, false = denied (only meaningful when IsHandled=true)
 }

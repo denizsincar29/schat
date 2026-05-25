@@ -67,6 +67,8 @@ func Migrate() error {
 		&models.Report{},
 		&models.Notification{},
 		&models.BroadcastMessage{},
+		&models.PendingRegistration{},
+		&models.RoomKnock{},
 	); err != nil {
 		return fmt.Errorf("failed to migrate dependent tables: %w", err)
 	}

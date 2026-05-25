@@ -383,6 +383,85 @@ func init() {
 		Handler:     handleDeleteRoom,
 		AdminOnly:   true,
 	})
+
+	// --- Admin approval commands ---
+	registerCommand(&Command{
+		Name:        "setrequireapproval",
+		Aliases:     []string{"requireapproval", "approvalmode"},
+		Description: "Enable or disable mandatory admin approval for new registrations (admin only)",
+		Usage:       "/setrequireapproval on|off",
+		Handler:     handleSetRequireApproval,
+		AdminOnly:   true,
+	})
+
+	registerCommand(&Command{
+		Name:        "pendingusers",
+		Aliases:     []string{"pending", "awaitingapproval"},
+		Description: "List users awaiting registration approval (admin only)",
+		Usage:       "/pendingusers",
+		Handler:     handlePendingUsers,
+		AdminOnly:   true,
+	})
+
+	registerCommand(&Command{
+		Name:        "approveuser",
+		Aliases:     []string{"approve"},
+		Description: "Approve a pending user registration (admin only)",
+		Usage:       "/approveuser @<username>",
+		Handler:     handleApproveUser,
+		AdminOnly:   true,
+	})
+
+	registerCommand(&Command{
+		Name:        "denyuser",
+		Aliases:     []string{"deny", "rejectuser"},
+		Description: "Deny a pending user registration and delete the account (admin only)",
+		Usage:       "/denyuser @<username>",
+		Handler:     handleDenyUser,
+		AdminOnly:   true,
+	})
+
+	// --- Waitroom commands ---
+	registerCommand(&Command{
+		Name:        "setwaitroom",
+		Aliases:     []string{"waitroom"},
+		Description: "Enable or disable waitroom for a room (room operator or admin)",
+		Usage:       "/setwaitroom #<room_name> on|off",
+		Handler:     handleSetWaitroom,
+	})
+
+	registerCommand(&Command{
+		Name:        "setoperator",
+		Aliases:     []string{"operator", "roomop"},
+		Description: "Set or clear the room operator (admin only)",
+		Usage:       "/setoperator #<room_name> @<username>|none",
+		Handler:     handleSetOperator,
+		AdminOnly:   true,
+	})
+
+	registerCommand(&Command{
+		Name:        "pendingknocks",
+		Aliases:     []string{"knocks", "waitlist"},
+		Description: "List users waiting to enter your room",
+		Usage:       "/pendingknocks [#room_name]",
+		Handler:     handlePendingKnocks,
+	})
+
+	registerCommand(&Command{
+		Name:        "admit",
+		Aliases:     []string{"allowin", "letIn"},
+		Description: "Admit a knocking user into the room",
+		Usage:       "/admit @<username> [#room_name]",
+		Handler:     handleAdmit,
+	})
+
+	registerCommand(&Command{
+		Name:        "denyknock",
+		Aliases:     []string{"reject", "turnaway"},
+		Description: "Deny a knocking user entry to the room",
+		Usage:       "/denyknock @<username> [#room_name]",
+		Handler:     handleDenyKnock,
+	})
 }
 
 func registerCommand(cmd *Command) {
@@ -475,7 +554,12 @@ func handleHelp(user *models.User, args []string) (string, error) {
 		},
 		{
 			Name:     "admin",
-			Commands: []string{"promote", "demote", "admins", "deleteuser", "permanent", "hide", "unhide"},
+			Commands: []string{"promote", "demote", "admins", "deleteuser", "permanent", "hide", "unhide",
+				"setrequireapproval", "pendingusers", "approveuser", "denyuser", "setoperator"},
+		},
+		{
+			Name:     "waitroom",
+			Commands: []string{"setwaitroom", "pendingknocks", "admit", "denyknock"},
 		},
 	}
 
@@ -644,6 +728,16 @@ func handleJoin(user *models.User, args []string) (string, error) {
 		// Verify password
 		if !auth.VerifyPassword(password, room.Password) {
 			return "", fmt.Errorf("incorrect password for room %s", roomName)
+		}
+	}
+
+	// Check if the room has a waitroom and user is not the operator/creator/admin
+	if room.HasWaitroom && !user.IsAdmin {
+		isOperator := (room.OperatorID != nil && *room.OperatorID == user.ID) ||
+			(room.CreatorID != nil && *room.CreatorID == user.ID)
+		if !isOperator {
+			// Return a sentinel - server.go will handle the interactive knock
+			return fmt.Sprintf("WAITROOM:%d", room.ID), nil
 		}
 	}
 
@@ -2131,7 +2225,6 @@ func handleGarbageCollect(user *models.User, args []string) (string, error) {
 
 	// 6. Clean up inactive notifications
 	thirtyDaysAgo := time.Now().AddDate(0, 0, -30)
-	var oldNotifications int64
 	notifResult := database.DB.Unscoped().Where("created_at < ? AND is_read = ?", thirtyDaysAgo, true).Delete(&models.Notification{})
 	if notifResult.RowsAffected > 0 {
 		result.WriteString(fmt.Sprintf("✓ Deleted %d old notifications\n", notifResult.RowsAffected))
@@ -2139,7 +2232,6 @@ func handleGarbageCollect(user *models.User, args []string) (string, error) {
 
 	// 7. Clean up old audit logs (older than 90 days)
 	ninetyDaysAgo := time.Now().AddDate(0, 0, -90)
-	var oldAuditLogs int64
 	auditResult := database.DB.Unscoped().Where("created_at < ?", ninetyDaysAgo).Delete(&models.AuditLog{})
 	if auditResult.RowsAffected > 0 {
 		result.WriteString(fmt.Sprintf("✓ Deleted %d old audit logs\n", auditResult.RowsAffected))
@@ -2234,4 +2326,351 @@ func handleDeleteRoom(user *models.User, args []string) (string, error) {
 	}
 
 	return result.String(), nil
+}
+
+// ─── Admin approval handlers ────────────────────────────────────────────────
+
+func handleSetRequireApproval(user *models.User, args []string) (string, error) {
+	if len(args) < 1 {
+		// Show current state
+		var setting models.Settings
+		if err := database.DB.Where("key = ?", "require_registration_approval").First(&setting).Error; err != nil {
+			return "Registration approval mode: off (default)", nil
+		}
+		if setting.Value == "true" {
+			return "Registration approval mode: ON — new users must be approved by an admin", nil
+		}
+		return "Registration approval mode: off", nil
+	}
+
+	val := strings.ToLower(strings.TrimSpace(args[0]))
+	if val != "on" && val != "off" && val != "true" && val != "false" && val != "1" && val != "0" {
+		return "", fmt.Errorf("usage: /setrequireapproval on|off")
+	}
+	enabled := val == "on" || val == "true" || val == "1"
+
+	var setting models.Settings
+	if err := database.DB.Where("key = ?", "require_registration_approval").First(&setting).Error; err != nil {
+		setting = models.Settings{Key: "require_registration_approval"}
+	}
+	if enabled {
+		setting.Value = "true"
+	} else {
+		setting.Value = "false"
+	}
+	if err := database.DB.Save(&setting).Error; err != nil {
+		return "", fmt.Errorf("failed to save setting: %w", err)
+	}
+
+	logAction(user, "setrequireapproval", fmt.Sprintf("Set require_registration_approval = %v", enabled))
+	if enabled {
+		return "Registration approval mode enabled. New users must now be approved by an admin before they can join.", nil
+	}
+	return "Registration approval mode disabled. New users can join immediately.", nil
+}
+
+func handlePendingUsers(user *models.User, args []string) (string, error) {
+	var pending []models.PendingRegistration
+	if err := database.DB.Preload("User").Where("is_handled = ?", false).Order("created_at ASC").Find(&pending).Error; err != nil {
+		return "", fmt.Errorf("failed to fetch pending registrations: %w", err)
+	}
+
+	if len(pending) == 0 {
+		return "No users awaiting approval.", nil
+	}
+
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("=== %d user(s) awaiting approval ===\n\n", len(pending)))
+	for _, p := range pending {
+		result.WriteString(fmt.Sprintf("  @%s (registered %s)\n", p.Username, p.CreatedAt.Format("2006-01-02 15:04")))
+		if p.Message != "" {
+			result.WriteString(fmt.Sprintf("    Message: %s\n", p.Message))
+		}
+	}
+	result.WriteString("\nUse /approveuser @<username> or /denyuser @<username>")
+	return result.String(), nil
+}
+
+func handleApproveUser(user *models.User, args []string) (string, error) {
+	if len(args) < 1 {
+		return "", fmt.Errorf("usage: /approveuser @<username>")
+	}
+	username := strings.TrimPrefix(args[0], "@")
+
+	var targetUser models.User
+	if err := database.DB.Where("username = ?", username).First(&targetUser).Error; err != nil {
+		return "", fmt.Errorf("user not found: @%s", username)
+	}
+	if !targetUser.IsPendingApproval {
+		return "", fmt.Errorf("@%s is not awaiting approval", username)
+	}
+
+	targetUser.IsPendingApproval = false
+	if err := database.DB.Save(&targetUser).Error; err != nil {
+		return "", fmt.Errorf("failed to approve user: %w", err)
+	}
+
+	// Mark pending registration as handled
+	database.DB.Model(&models.PendingRegistration{}).
+		Where("user_id = ? AND is_handled = ?", targetUser.ID, false).
+		Updates(map[string]interface{}{"is_handled": true})
+
+	logAction(user, "approveuser", fmt.Sprintf("Approved registration for %s", username))
+	return fmt.Sprintf("@%s has been approved and can now log in.", username), nil
+}
+
+func handleDenyUser(user *models.User, args []string) (string, error) {
+	if len(args) < 1 {
+		return "", fmt.Errorf("usage: /denyuser @<username>")
+	}
+	username := strings.TrimPrefix(args[0], "@")
+
+	var targetUser models.User
+	if err := database.DB.Where("username = ?", username).First(&targetUser).Error; err != nil {
+		return "", fmt.Errorf("user not found: @%s", username)
+	}
+	if !targetUser.IsPendingApproval {
+		return "", fmt.Errorf("@%s is not awaiting approval", username)
+	}
+
+	// Mark pending record handled, then ban the user so waitForApproval detects denial
+	database.DB.Model(&models.PendingRegistration{}).
+		Where("user_id = ? AND is_handled = ?", targetUser.ID, false).
+		Updates(map[string]interface{}{"is_handled": true})
+
+	// Delete the user account outright so they can re-register with the same username if needed
+	database.DB.Unscoped().Delete(&targetUser)
+
+	logAction(user, "denyuser", fmt.Sprintf("Denied registration for %s", username))
+	return fmt.Sprintf("Registration for @%s has been denied and the account removed.", username), nil
+}
+
+// ─── Waitroom handlers ───────────────────────────────────────────────────────
+
+// isRoomOperator returns true if the user is the room operator or creator.
+func isRoomOperator(user *models.User, room *models.Room) bool {
+	if user.IsAdmin {
+		return true
+	}
+	if room.OperatorID != nil && *room.OperatorID == user.ID {
+		return true
+	}
+	if room.CreatorID != nil && *room.CreatorID == user.ID {
+		return true
+	}
+	return false
+}
+
+func handleSetWaitroom(user *models.User, args []string) (string, error) {
+	if len(args) < 2 {
+		return "", fmt.Errorf("usage: /setwaitroom #<room_name> on|off")
+	}
+	roomName := stripPrefixes(args[0])
+	val := strings.ToLower(strings.TrimSpace(args[1]))
+	if val != "on" && val != "off" && val != "true" && val != "false" {
+		return "", fmt.Errorf("usage: /setwaitroom #<room_name> on|off")
+	}
+	enabled := val == "on" || val == "true"
+
+	var room models.Room
+	if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
+		return "", fmt.Errorf("room not found: %s", roomName)
+	}
+
+	if !isRoomOperator(user, &room) {
+		return "", fmt.Errorf("only the room operator or creator can change this setting")
+	}
+
+	room.HasWaitroom = enabled
+	if err := database.DB.Save(&room).Error; err != nil {
+		return "", fmt.Errorf("failed to update room: %w", err)
+	}
+
+	logAction(user, "setwaitroom", fmt.Sprintf("Set waitroom=%v for room %s", enabled, roomName))
+	if enabled {
+		return fmt.Sprintf("Waitroom enabled for #%s. Users must now knock to enter.", roomName), nil
+	}
+	return fmt.Sprintf("Waitroom disabled for #%s. Users can join freely.", roomName), nil
+}
+
+func handleSetOperator(user *models.User, args []string) (string, error) {
+	if len(args) < 2 {
+		return "", fmt.Errorf("usage: /setoperator #<room_name> @<username>|none")
+	}
+	roomName := stripPrefixes(args[0])
+	targetStr := strings.TrimPrefix(args[1], "@")
+
+	var room models.Room
+	if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
+		return "", fmt.Errorf("room not found: %s", roomName)
+	}
+
+	if targetStr == "none" || targetStr == "" {
+		room.OperatorID = nil
+		if err := database.DB.Save(&room).Error; err != nil {
+			return "", fmt.Errorf("failed to clear operator: %w", err)
+		}
+		logAction(user, "setoperator", fmt.Sprintf("Cleared operator for room %s", roomName))
+		return fmt.Sprintf("Operator cleared for #%s. Creator (if set) is now the default operator.", roomName), nil
+	}
+
+	var targetUser models.User
+	if err := database.DB.Where("username = ?", targetStr).First(&targetUser).Error; err != nil {
+		return "", fmt.Errorf("user not found: @%s", targetStr)
+	}
+
+	room.OperatorID = &targetUser.ID
+	if err := database.DB.Save(&room).Error; err != nil {
+		return "", fmt.Errorf("failed to set operator: %w", err)
+	}
+
+	logAction(user, "setoperator", fmt.Sprintf("Set @%s as operator of room %s", targetStr, roomName))
+	return fmt.Sprintf("@%s is now the operator of #%s.", targetStr, roomName), nil
+}
+
+func handlePendingKnocks(user *models.User, args []string) (string, error) {
+	var roomIDs []uint
+
+	if len(args) > 0 {
+		roomName := stripPrefixes(args[0])
+		var room models.Room
+		if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
+			return "", fmt.Errorf("room not found: %s", roomName)
+		}
+		if !isRoomOperator(user, &room) {
+			return "", fmt.Errorf("only the room operator can view the waitlist")
+		}
+		roomIDs = []uint{room.ID}
+	} else {
+		// Find all rooms where this user is operator or creator
+		var rooms []models.Room
+		database.DB.Where("(operator_id = ? OR creator_id = ?) AND has_waitroom = ?", user.ID, user.ID, true).Find(&rooms)
+		if user.IsAdmin {
+			// Admins see all pending knocks
+			database.DB.Where("has_waitroom = ?", true).Find(&rooms)
+		}
+		for _, r := range rooms {
+			roomIDs = append(roomIDs, r.ID)
+		}
+	}
+
+	if len(roomIDs) == 0 {
+		return "You have no rooms with waitrooms.", nil
+	}
+
+	var knocks []models.RoomKnock
+	if err := database.DB.Preload("User").Preload("Room").
+		Where("room_id IN ? AND is_handled = ?", roomIDs, false).
+		Order("created_at ASC").Find(&knocks).Error; err != nil {
+		return "", fmt.Errorf("failed to fetch knocks: %w", err)
+	}
+
+	if len(knocks) == 0 {
+		return "No users waiting to enter.", nil
+	}
+
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("=== %d user(s) knocking ===\n\n", len(knocks)))
+	for _, k := range knocks {
+		displayName := k.User.Username
+		if k.User.Nickname != "" {
+			displayName = k.User.Nickname
+		}
+		result.WriteString(fmt.Sprintf("  @%s in #%s (waiting since %s)\n",
+			displayName, k.Room.Name, k.CreatedAt.Format("15:04:05")))
+		if k.Message != "" {
+			result.WriteString(fmt.Sprintf("    Message: %s\n", k.Message))
+		}
+	}
+	result.WriteString("\nUse /admit @<username> or /denyknock @<username>")
+	return result.String(), nil
+}
+
+func handleAdmit(user *models.User, args []string) (string, error) {
+	if len(args) < 1 {
+		return "", fmt.Errorf("usage: /admit @<username> [#room_name]")
+	}
+	username := strings.TrimPrefix(args[0], "@")
+
+	var targetUser models.User
+	if err := database.DB.Where("username = ?", username).First(&targetUser).Error; err != nil {
+		return "", fmt.Errorf("user not found: @%s", username)
+	}
+
+	// Find the knock
+	query := database.DB.Where("user_id = ? AND is_handled = ?", targetUser.ID, false)
+	if len(args) >= 2 {
+		roomName := stripPrefixes(args[1])
+		var room models.Room
+		if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
+			return "", fmt.Errorf("room not found: %s", roomName)
+		}
+		query = query.Where("room_id = ?", room.ID)
+	}
+
+	var knock models.RoomKnock
+	if err := query.Preload("Room").First(&knock).Error; err != nil {
+		return "", fmt.Errorf("no pending knock found for @%s", username)
+	}
+
+	// Check operator permission
+	if !isRoomOperator(user, &knock.Room) {
+		return "", fmt.Errorf("only the room operator can admit users")
+	}
+
+	// Admit: mark handled, set admitted flag, move user into the room
+	knock.IsHandled = true
+	knock.IsAdmitted = true
+	if err := database.DB.Save(&knock).Error; err != nil {
+		return "", fmt.Errorf("failed to admit user: %w", err)
+	}
+
+	// Move the user into the room
+	targetUser.CurrentRoomID = &knock.RoomID
+	if err := database.DB.Save(&targetUser).Error; err != nil {
+		return "", fmt.Errorf("failed to move user to room: %w", err)
+	}
+
+	logAction(user, "admit", fmt.Sprintf("Admitted @%s to room #%s", username, knock.Room.Name))
+	return fmt.Sprintf("@%s has been admitted to #%s.", username, knock.Room.Name), nil
+}
+
+func handleDenyKnock(user *models.User, args []string) (string, error) {
+	if len(args) < 1 {
+		return "", fmt.Errorf("usage: /denyknock @<username> [#room_name]")
+	}
+	username := strings.TrimPrefix(args[0], "@")
+
+	var targetUser models.User
+	if err := database.DB.Where("username = ?", username).First(&targetUser).Error; err != nil {
+		return "", fmt.Errorf("user not found: @%s", username)
+	}
+
+	query := database.DB.Where("user_id = ? AND is_handled = ?", targetUser.ID, false)
+	if len(args) >= 2 {
+		roomName := stripPrefixes(args[1])
+		var room models.Room
+		if err := database.DB.Where("name = ?", roomName).First(&room).Error; err != nil {
+			return "", fmt.Errorf("room not found: %s", roomName)
+		}
+		query = query.Where("room_id = ?", room.ID)
+	}
+
+	var knock models.RoomKnock
+	if err := query.Preload("Room").First(&knock).Error; err != nil {
+		return "", fmt.Errorf("no pending knock found for @%s", username)
+	}
+
+	if !isRoomOperator(user, &knock.Room) {
+		return "", fmt.Errorf("only the room operator can deny entry")
+	}
+
+	knock.IsHandled = true
+	knock.IsAdmitted = false
+	if err := database.DB.Save(&knock).Error; err != nil {
+		return "", fmt.Errorf("failed to deny knock: %w", err)
+	}
+
+	logAction(user, "denyknock", fmt.Sprintf("Denied @%s entry to room #%s", username, knock.Room.Name))
+	return fmt.Sprintf("@%s has been denied entry to #%s.", username, knock.Room.Name), nil
 }
