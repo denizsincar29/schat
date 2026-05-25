@@ -756,17 +756,17 @@ func handleGuestSession(channel ssh.Channel, user *models.User, guestRoom *model
 		displayName = user.Username
 	}
 
-	fmt.Fprintf(channel, "\n")
-	fmt.Fprintf(channel, "Welcome to guest room #%s, %s!\n", guestRoom.Name, displayName)
-	fmt.Fprintf(channel, "You are logged in as a guest (limited to this room only).\n")
+	terminal.Write([]byte("\n"))
+	terminal.Write([]byte(fmt.Sprintf("Welcome to guest room #%s, %s!\n", guestRoom.Name, displayName)))
+	terminal.Write([]byte("You are logged in as a guest (limited to this room only).\n"))
 	if guestRoom.ExpiresAt != nil {
-		fmt.Fprintf(channel, "This room expires at: %s\n", guestRoom.ExpiresAt.Format("2006-01-02 15:04:05"))
+		terminal.Write([]byte(fmt.Sprintf("This room expires at: %s\n", guestRoom.ExpiresAt.Format("2006-01-02 15:04:05"))))
 	}
-	fmt.Fprintf(channel, "Type /help for available commands.\n")
-	fmt.Fprintf(channel, "\n")
+	terminal.Write([]byte("Type /help for available commands.\n"))
+	terminal.Write([]byte("\n"))
 
 	// Show chat history for current room
-	showChatHistory(channel, user)
+	showChatHistory(terminal, user)
 
 	// Broadcast join message
 	if user.CurrentRoomID != nil {
@@ -890,22 +890,23 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User, ctx *sessio
 		displayName = user.Nickname
 	}
 
-	fmt.Fprintf(channel, "\n")
-	fmt.Fprintf(channel, "Welcome to schat, %s!\n", displayName)
+	// Use terminal.Write for all pre-loop output so writeWithCRLF handles \r\n correctly
+	terminal.Write([]byte("\n"))
+	terminal.Write([]byte(fmt.Sprintf("Welcome to schat, %s!\n", displayName)))
 	if user.IsAdmin {
-		fmt.Fprintf(channel, "You are logged in as an admin.\n")
+		terminal.Write([]byte("You are logged in as an admin.\n"))
 	}
-	fmt.Fprintf(channel, "Type /help for available commands.\n")
-	fmt.Fprintf(channel, "\n")
+	terminal.Write([]byte("Type /help for available commands.\n"))
+	terminal.Write([]byte("\n"))
 
 	// Deliver offline notifications
 	deliverOfflineNotifications(client)
 
 	// Show chat history (last 10 events)
-	showChatHistory(channel, user)
+	showChatHistory(terminal, user)
 
 	// Check for unread mentions and private messages
-	showUnreadNotifications(channel, user)
+	showUnreadNotifications(terminal, user)
 
 	// Broadcast join message
 	if user.CurrentRoomID != nil {
@@ -1348,7 +1349,7 @@ func handleWaitroomKnock(client *Client, roomID uint) {
 	if admitted {
 		database.DB.First(client.User, client.User.ID)
 		fmt.Fprintf(client.Terminal, "\n*** You have been admitted to #%s! ***\n\n", room.Name)
-		showChatHistory(client.Conn, client.User)
+		showChatHistory(client.Terminal, client.User)
 		broadcastToRoom(roomID, fmt.Sprintf("*** %s has joined the room", displayName), client.User.ID)
 	} else {
 		fmt.Fprintf(client.Terminal, "\n*** Your request to enter #%s was denied. ***\n\n", room.Name)
@@ -2703,7 +2704,7 @@ func logAction(user *models.User, action string, details string) {
 	database.DB.Create(&log)
 }
 
-func showChatHistory(channel ssh.Channel, user *models.User) {
+func showChatHistory(w io.Writer, user *models.User) {
 	if user.CurrentRoomID == nil {
 		return
 	}
@@ -2717,7 +2718,7 @@ func showChatHistory(channel ssh.Channel, user *models.User) {
 		Find(&messages)
 
 	if len(messages) == 0 {
-		fmt.Fprintf(channel, "--- No recent messages ---\r\n\r\n")
+		fmt.Fprintf(w, "--- No recent messages ---\r\n\n")
 		return
 	}
 
@@ -2733,19 +2734,19 @@ func showChatHistory(channel ssh.Channel, user *models.User) {
 		content := msg.Content
 		if strings.HasPrefix(content, "@me ") {
 			// Emote
-			fmt.Fprintf(channel, "* %s %s\r\n", displayName, content[4:])
+			fmt.Fprintf(w, "* %s %s\n", displayName, content[4:])
 		} else if strings.Contains(content, "@me") {
 			// Inline @me
-			fmt.Fprintf(channel, "%s\r\n", strings.ReplaceAll(content, "@me", displayName))
+			fmt.Fprintf(w, "%s\n", strings.ReplaceAll(content, "@me", displayName))
 		} else {
 			// Normal message
-			fmt.Fprintf(channel, "%s: %s\r\n", displayName, content)
+			fmt.Fprintf(w, "%s: %s\n", displayName, content)
 		}
 	}
-	fmt.Fprintf(channel, "\r\n")
+	fmt.Fprintf(w, "\n")
 }
 
-func showUnreadNotifications(channel ssh.Channel, user *models.User) {
+func showUnreadNotifications(w io.Writer, user *models.User) {
 	// Check for unread mentions
 	var mentionCount int64
 	database.DB.Model(&models.Mention{}).Where("user_id = ? AND is_read = ?", user.ID, false).Count(&mentionCount)
@@ -2757,14 +2758,14 @@ func showUnreadNotifications(channel ssh.Channel, user *models.User) {
 		Count(&pmCount)
 
 	if mentionCount > 0 || pmCount > 0 {
-		fmt.Fprintf(channel, "*** You have unread messages! ***\n")
+		fmt.Fprintf(w, "*** You have unread messages! ***\n")
 		if mentionCount > 0 {
-			fmt.Fprintf(channel, "  - %d unread mention(s)\n", mentionCount)
+			fmt.Fprintf(w, "  - %d unread mention(s)\n", mentionCount)
 		}
 		if pmCount > 0 {
-			fmt.Fprintf(channel, "  - %d unread private message(s)\n", pmCount)
+			fmt.Fprintf(w, "  - %d unread private message(s)\n", pmCount)
 		}
-		fmt.Fprintf(channel, "Type /news to view them.\n\n")
+		fmt.Fprintf(w, "Type /news to view them.\n\n")
 	}
 
 	// Check for unread reports (admin only)
@@ -2772,8 +2773,8 @@ func showUnreadNotifications(channel ssh.Channel, user *models.User) {
 		var reportCount int64
 		database.DB.Model(&models.Report{}).Where("is_read = ?", false).Count(&reportCount)
 		if reportCount > 0 {
-			fmt.Fprintf(channel, "*** You have %d unread report(s) from users. ***\n", reportCount)
-			fmt.Fprintf(channel, "Type /reports to view them.\n\n")
+			fmt.Fprintf(w, "*** You have %d unread report(s) from users. ***\n", reportCount)
+			fmt.Fprintf(w, "Type /reports to view them.\n\n")
 		}
 	}
 }
