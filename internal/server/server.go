@@ -45,6 +45,20 @@ type Client struct {
 	TermHeight int // Terminal height in rows
 }
 
+// chatPrompt returns the prompt shown to a user while they are typing in the
+// main chat loop. Instead of a generic "> " marker, the prompt is the user's
+// own display name (nickname if set, otherwise username) followed by ": ",
+// so a sent line reads "username: message" just like messages from other
+// users in the room. This keeps the screen-reader experience consistent
+// between your own messages and everyone else's.
+func chatPrompt(user *models.User) string {
+	displayName := user.Username
+	if user.Nickname != "" {
+		displayName = user.Nickname
+	}
+	return displayName + ": "
+}
+
 // sessionContext holds PTY dimensions and client reference for window-change updates
 type sessionContext struct {
 	width  int
@@ -690,7 +704,7 @@ func handleGuestSession(channel ssh.Channel, user *models.User, guestRoom *model
 	database.DB.Save(user)
 
 	// Start reading input using term.Terminal for proper echo handling
-	terminal := term.NewTerminal(channel, "> ")
+	terminal := term.NewTerminal(channel, chatPrompt(user))
 
 	// Set terminal size from PTY request
 	var width, height int
@@ -813,7 +827,7 @@ func handleAuthenticatedUser(channel ssh.Channel, user *models.User, ctx *sessio
 	database.DB.Save(user)
 
 	// Start reading input using term.Terminal for proper echo handling
-	terminal := term.NewTerminal(channel, "> ")
+	terminal := term.NewTerminal(channel, chatPrompt(user))
 
 	// Set terminal size from PTY request
 	var width, height int
@@ -1212,6 +1226,9 @@ func handleCommand(client *Client, line string) {
 		database.DB.First(client.User, client.User.ID)
 
 		switch cmdName {
+		case "nick", "nickname":
+			// Nickname changed; refresh the live chat prompt to match
+			client.Terminal.SetPrompt(chatPrompt(client.User))
 		case "create", "createguestroom", "cgr", "guestroom":
 			// Room was created, notify admins
 			if len(args) > 0 {
@@ -1320,7 +1337,7 @@ func handleWaitroomKnock(client *Client, roomID uint) {
 	}
 	if err := database.DB.Create(&knock).Error; err != nil {
 		fmt.Fprintf(client.Terminal, "Error creating knock: %v\n", err)
-		client.Terminal.SetPrompt("> ")
+		client.Terminal.SetPrompt(chatPrompt(client.User))
 		return
 	}
 
@@ -1344,7 +1361,7 @@ func handleWaitroomKnock(client *Client, roomID uint) {
 	admitted := waitForKnockDecision(client.Terminal, knock.ID)
 
 	// Restore prompt
-	client.Terminal.SetPrompt("> ")
+	client.Terminal.SetPrompt(chatPrompt(client.User))
 
 	if admitted {
 		database.DB.First(client.User, client.User.ID)
@@ -1456,7 +1473,7 @@ func handleAddKey(client *Client, args []string) {
 	fmt.Fprintf(client.Terminal, "\n")
 
 	// Store original prompt to restore later
-	originalPrompt := "> "
+	originalPrompt := chatPrompt(client.User)
 	client.Terminal.SetPrompt("")
 	var keyLines []string
 	for {
@@ -1651,7 +1668,7 @@ func qrCodeToUnicode(qr *qrcode.QRCode) string {
 func handleBroadcastInteractive(client *Client) {
 	fmt.Fprintf(client.Terminal, "\n=== Schedule Broadcast Message ===\n\n")
 
-	originalPrompt := "> "
+	originalPrompt := chatPrompt(client.User)
 
 	// Get base time
 	client.Terminal.SetPrompt("Enter base time (YYYY-MM-DD HH:MM): ")
@@ -1802,7 +1819,7 @@ func handleSignupInteractive(client *Client) {
 	fmt.Fprintf(client.Terminal, "You are currently logged in as guest: %s\n", client.User.Nickname)
 	fmt.Fprintf(client.Terminal, "Let's create a permanent account for you.\n\n")
 
-	originalPrompt := "> "
+	originalPrompt := chatPrompt(client.User)
 
 	// Get desired username
 	client.Terminal.SetPrompt("Enter your desired username: ")
